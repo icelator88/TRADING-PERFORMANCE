@@ -1,0 +1,201 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Private user account profile owning synced trading journal records.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name from Google Auth.",
+          "maxLength": 120
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified email address of the user.",
+          "maxLength": 200
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": ["uid", "displayName", "email", "createdAt", "updatedAt"]
+    },
+    "Trade": {
+      "title": "Trade",
+      "description": "Mechanical trading journal entry belonging strictly to one authenticated user.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Document identifier.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["backtest", "live", "missed"],
+          "description": "Journal bucket separating backtest, executed live journal, and missed trades."
+        },
+        "date": {
+          "type": "string",
+          "description": "ISO date YYYY-MM-DD.",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "day": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "session": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "entryTime": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "exitTime": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "asset": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "setup": {
+          "type": "string",
+          "enum": ["S1", "SSA", "MUT", "SBIL DOMINANCE REALE", "SBIL INTRADOMINANCE"],
+          "maxLength": 40
+        },
+        "strategy": {
+          "type": "string",
+          "enum": ["S1", "SSA", "MUT", "SBIL DOMINANCE REALE", "SBIL INTRADOMINANCE"],
+          "maxLength": 40
+        },
+        "isMissed": {
+          "type": "boolean"
+        },
+        "bias": {
+          "type": "string",
+          "enum": ["LONG", "SHORT"]
+        },
+        "riskPct": {
+          "type": "number"
+        },
+        "entryPrice": {
+          "type": "number"
+        },
+        "slPrice": {
+          "type": "number"
+        },
+        "tpPrice": {
+          "type": "number"
+        },
+        "slPips": {
+          "type": "number"
+        },
+        "tpPips": {
+          "type": "number"
+        },
+        "targetRR": {
+          "type": "number"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["TP", "STOP LOSS", "BE", "UNFILLED"]
+        },
+        "netR": {
+          "type": "number"
+        },
+        "rrMax": {
+          "type": "number"
+        },
+        "netReturnPct": {
+          "type": "number"
+        },
+        "missedReason": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "tradingViewUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "extraColumns": {
+          "type": "object"
+        },
+        "clientCreatedAt": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "category",
+        "date",
+        "asset",
+        "setup",
+        "strategy",
+        "isMissed",
+        "bias",
+        "riskPct",
+        "outcome",
+        "netR",
+        "netReturnPct",
+        "notes",
+        "tradingViewUrl",
+        "clientCreatedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile document acting as the root parent for the user's trading journal subcollections."
+    },
+    "/users/{userId}/trades/{tradeId}": {
+      "schema": { "$ref": "#/entities/Trade" },
+      "description": "Per-user trading journal entries across Backtest, Live Journal, and Missed Trades."
+    }
+  }
+}

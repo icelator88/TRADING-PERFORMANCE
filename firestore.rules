@@ -1,0 +1,196 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 4.1: Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Pillar 3: Global hardened primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function parentUserExists(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId));
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'email', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'email', 'createdAt', 'updatedAt'])
+        && data.uid is string
+        && data.uid == userId
+        && isValidId(data.uid)
+        && data.displayName is string
+        && data.displayName.size() <= 120
+        && data.email is string
+        && data.email.size() <= 200
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidStrategy(val) {
+      return val is string
+        && val.size() <= 40
+        && val in ['S1', 'SSA', 'MUT', 'SBIL DOMINANCE REALE', 'SBIL INTRADOMINANCE'];
+    }
+
+    function isOptionalSmallString(data, key, maxLen) {
+      return !(key in data) || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function isOptionalNumber(data, key, minVal, maxVal) {
+      return !(key in data) || (data[key] is number && data[key] >= minVal && data[key] <= maxVal);
+    }
+
+    function isValidTrade(data, userId, tradeId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'category', 'date', 'asset', 'setup', 'strategy',
+          'isMissed', 'bias', 'riskPct', 'outcome', 'netR', 'netReturnPct',
+          'notes', 'tradingViewUrl', 'clientCreatedAt', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'category', 'date', 'day', 'session', 'entryTime', 'exitTime',
+          'asset', 'setup', 'strategy', 'isMissed', 'bias', 'riskPct',
+          'entryPrice', 'slPrice', 'tpPrice', 'slPips', 'tpPips', 'targetRR',
+          'outcome', 'netR', 'rrMax', 'netReturnPct', 'missedReason',
+          'notes', 'tradingViewUrl', 'extraColumns', 'clientCreatedAt', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == tradeId
+        && isValidId(data.id)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.category is string
+        && data.category.size() <= 16
+        && data.category in ['backtest', 'live', 'missed']
+        && data.date is string
+        && data.date.size() == 10
+        && data.date.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && data.asset is string
+        && data.asset.size() >= 1
+        && data.asset.size() <= 32
+        && isValidStrategy(data.setup)
+        && isValidStrategy(data.strategy)
+        && data.isMissed is bool
+        && data.bias is string
+        && data.bias.size() <= 8
+        && data.bias in ['LONG', 'SHORT']
+        && data.riskPct is number
+        && data.riskPct >= 0
+        && data.riskPct <= 100
+        && data.outcome is string
+        && data.outcome.size() <= 16
+        && data.outcome in ['TP', 'STOP LOSS', 'BE', 'UNFILLED']
+        && data.netR is number
+        && data.netR >= -1000
+        && data.netR <= 10000
+        && data.netReturnPct is number
+        && data.netReturnPct >= -10000
+        && data.netReturnPct <= 100000
+        && data.notes is string
+        && data.notes.size() <= 2000
+        && data.tradingViewUrl is string
+        && data.tradingViewUrl.size() <= 500
+        && data.clientCreatedAt is number
+        && data.clientCreatedAt >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && isOptionalSmallString(data, 'day', 32)
+        && isOptionalSmallString(data, 'session', 40)
+        && isOptionalSmallString(data, 'entryTime', 20)
+        && isOptionalSmallString(data, 'exitTime', 20)
+        && isOptionalSmallString(data, 'missedReason', 80)
+        && isOptionalNumber(data, 'entryPrice', 0, 100000000)
+        && isOptionalNumber(data, 'slPrice', 0, 100000000)
+        && isOptionalNumber(data, 'tpPrice', 0, 100000000)
+        && isOptionalNumber(data, 'slPips', 0, 1000000)
+        && isOptionalNumber(data, 'tpPips', 0, 1000000)
+        && isOptionalNumber(data, 'targetRR', -1000, 10000)
+        && isOptionalNumber(data, 'rrMax', -1000, 10000)
+        && (!('extraColumns' in data) || (data.extraColumns is map && data.extraColumns.size() <= 20));
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'updatedAt']);
+      allow delete: if isVerifiedUser() && isValidId(userId) && isOwner(userId);
+
+      match /trades/{tradeId} {
+        allow get: if isValidId(userId)
+          && isValidId(tradeId)
+          && isOwner(userId)
+          && parentUserExists(userId);
+        allow list: if isValidId(userId)
+          && isOwner(userId)
+          && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(tradeId)
+          && isOwner(userId)
+          && isValidTrade(incoming(), userId, tradeId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && parentUserExists(userId);
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(tradeId)
+          && isOwner(userId)
+          && isValidTrade(incoming(), userId, tradeId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && parentUserExists(userId)
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'category', 'date', 'day', 'session', 'entryTime', 'exitTime',
+            'asset', 'setup', 'strategy', 'isMissed', 'bias', 'riskPct',
+            'entryPrice', 'slPrice', 'tpPrice', 'slPips', 'tpPips', 'targetRR',
+            'outcome', 'netR', 'rrMax', 'netReturnPct', 'missedReason',
+            'notes', 'tradingViewUrl', 'extraColumns', 'updatedAt'
+          ]);
+        allow delete: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(tradeId)
+          && isOwner(userId)
+          && parentUserExists(userId);
+      }
+    }
+  }
+}

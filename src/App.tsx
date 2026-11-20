@@ -1,5 +1,15 @@
-import { useMemo, useRef, useState } from 'react';
-import { Download, FileJson, RotateCcw, Sparkles, Upload } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Cloud,
+  Download,
+  FileJson,
+  LogIn,
+  LogOut,
+  RotateCcw,
+  Sparkles,
+  Upload,
+} from 'lucide-react';
+import { onAuthStateChanged, type User } from 'firebase/auth';
 import { AkinatorCard } from './components/AkinatorCard';
 import { ConfirmModal } from './components/ConfirmModal';
 import { DrawdownChart } from './components/DrawdownChart';
@@ -10,6 +20,7 @@ import { InstitutionalMetricsPanel } from './components/InstitutionalMetricsPane
 import { SetupFilterBar } from './components/SetupFilterBar';
 import { TradeModal } from './components/TradeModal';
 import { TradeTable } from './components/TradeTable';
+import { auth, signInWithGooglePopup, signOutFirebase } from './firebase';
 import { TRANSLATIONS } from './i18n/translations';
 import {
   type ActiveTab,
@@ -28,8 +39,16 @@ import {
   roundTo,
   runRowCalculationEngine,
 } from './utils/calculations';
+import {
+  batchCreateTradesInFirestore,
+  deleteTradeInFirestore,
+  ensureUserProfile,
+  subscribeUserTrades,
+  upsertTradeInFirestore,
+} from './utils/firestoreSync';
 import { analizzaTradeConGemini, buildGeminiReviewPrompt } from './utils/geminiReview';
 import {
+  buildTradeDuplicateKey,
   deduplicateImportedTrades,
   exportBackupJson,
   exportTradesCsv,
@@ -87,6 +106,35 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
 
+  // Firebase Auth & Firestore Cloud Sync
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [cloudSyncStatus, setCloudSyncStatus] = useState<'idle' | 'syncing' | 'synced'>('idle');
+  const [fatalError, setFatalError] = useState<Error | null>(null);
+
+  const cloudIdsRef = useRef<Set<string>>(new Set());
+  const initialSyncDoneRef = useRef<boolean>(false);
+  const backtestRef = useRef<TradeRecord[]>(backtestTrades);
+  const liveRef = useRef<TradeRecord[]>(liveTrades);
+  const missedRef = useRef<TradeRecord[]>(missedTrades);
+
+  useEffect(() => {
+    backtestRef.current = backtestTrades;
+  }, [backtestTrades]);
+
+  useEffect(() => {
+    liveRef.current = liveTrades;
+  }, [liveTrades]);
+
+  useEffect(() => {
+    missedRef.current = missedTrades;
+  }, [missedTrades]);
+
+  if (fatalError) {
+    throw fatalError;
+  }
+
   const t = TRANSLATIONS[lang];
 
   const handleLanguageChange = (nextLang: Language) => {
@@ -103,6 +151,187 @@ export function App() {
       setToast(null);
       toastTimerRef.current = null;
     }, duration);
+  };
+
+  const splitTradesByCategory = (all: TradeRecord[]) => {
+    const bt: TradeRecord[] = [];
+    const lv: TradeRecord[] = [];
+    const ms: TradeRecord[] = [];
+    all.forEach((tr) => {
+      if (tr.category === 'backtest') bt.push(tr);
+      else if (tr.category === 'missed') ms.push(tr);
+      else lv.push(tr);
+    });
+    return { bt, lv, ms };
+  };
+
+  useEffect(() => {
+    let active = true;
+    let unsubTrades: (() => void) | null = null;
+
+    const unsubAuth = onAuthStateChanged(auth, async (user) => {
+      unsubTrades?.();
+      unsubTrades = null;
+
+      if (!active) return;
+
+      if (!user) {
+        initialSyncDoneRef.current = false;
+        cloudIdsRef.current.clear();
+        setFirebaseUser(null);
+        setCloudSyncStatus('idle');
+        setAuthReady(true);
+        return;
+      }
+
+      setFirebaseUser(user);
+      setAuthReady(true);
+      setCloudSyncStatus('syncing');
+      initialSyncDoneRef.current = false;
+
+      try {
+        await ensureUserProfile(user);
+      } catch (err) {
+        if (active) {
+          setFatalError(err instanceof Error ? err : new Error(String(err)));
+        }
+        return;
+      }
+
+      if (!active) return;
+
+      unsubTrades = subscribeUserTrades(
+        user.uid,
+        async (cloudTrades) => {
+          if (!active) return;
+
+          const nextCloudIds = new Set(cloudTrades.map((tr) => tr.id));
+
+          if (!initialSyncDoneRef.current) {
+            initialSyncDoneRef.current = true;
+            const localAll = [
+              ...backtestRef.current,
+              ...liveRef.current,
+              ...missedRef.current,
+            ];
+            const cloudDupKeys = new Set(
+              cloudTrades.map((tr) => `${tr.category}|${buildTradeDuplicateKey(tr)}`),
+            );
+            const seenLocalIds = new Set<string>();
+            const localOnlyTrades: TradeRecord[] = [];
+
+            localAll.forEach((tr) => {
+              const catKey = `${tr.category}|${buildTradeDuplicateKey(tr)}`;
+              if (
+                !nextCloudIds.has(tr.id) &&
+                !cloudDupKeys.has(catKey) &&
+                !seenLocalIds.has(tr.id)
+              ) {
+                seenLocalIds.add(tr.id);
+                cloudDupKeys.add(catKey);
+                localOnlyTrades.push(tr);
+              }
+            });
+
+            if (localOnlyTrades.length > 0) {
+              localOnlyTrades.forEach((tr) => nextCloudIds.add(tr.id));
+              cloudIdsRef.current = nextCloudIds;
+
+              const merged = [...cloudTrades, ...localOnlyTrades];
+              const { bt, lv, ms } = splitTradesByCategory(merged);
+              setBacktestTrades(bt);
+              setLiveTrades(lv);
+              setMissedTrades(ms);
+              saveTradesSafely('backtest', bt);
+              saveTradesSafely('live', lv);
+              saveTradesSafely('missed', ms);
+
+              try {
+                await batchCreateTradesInFirestore(user.uid, localOnlyTrades);
+                if (active) setCloudSyncStatus('synced');
+              } catch (err) {
+                if (active) {
+                  setFatalError(err instanceof Error ? err : new Error(String(err)));
+                }
+              }
+              return;
+            }
+          }
+
+          cloudIdsRef.current = nextCloudIds;
+          const { bt, lv, ms } = splitTradesByCategory(cloudTrades);
+          setBacktestTrades(bt);
+          setLiveTrades(lv);
+          setMissedTrades(ms);
+          saveTradesSafely('backtest', bt);
+          saveTradesSafely('live', lv);
+          saveTradesSafely('missed', ms);
+          setCloudSyncStatus('synced');
+        },
+        (err) => {
+          if (active) setFatalError(err);
+        },
+      );
+    });
+
+    return () => {
+      active = false;
+      unsubTrades?.();
+      unsubAuth();
+    };
+  }, []);
+
+  const handleGoogleSignIn = async () => {
+    setAuthBusy(true);
+    try {
+      await signInWithGooglePopup();
+      showToast(
+        lang === 'en'
+          ? 'Google Sign-In completed. Cloud sync active.'
+          : 'Accesso Google completato. Sincronizzazione cloud attiva.',
+      );
+    } catch (err) {
+      const code =
+        typeof err === 'object' && err && 'code' in err
+          ? String((err as { code?: unknown }).code ?? '')
+          : '';
+      if (
+        code === 'auth/popup-closed-by-user' ||
+        code === 'auth/cancelled-popup-request'
+      ) {
+        showToast(
+          lang === 'en'
+            ? 'Google sign-in popup closed.'
+            : 'Finestra di accesso Google chiusa.',
+        );
+      } else {
+        showToast(
+          lang === 'en'
+            ? 'Google sign-in failed. Allow popups or verify Firebase Auth configuration.'
+            : 'Accesso Google non riuscito. Consenti i popup o verifica Firebase Auth.',
+        );
+      }
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleGoogleSignOut = async () => {
+    setAuthBusy(true);
+    try {
+      await signOutFirebase();
+      showToast(
+        lang === 'en'
+          ? 'Signed out. Local data remains preserved in browser storage.'
+          : 'Disconnesso. I dati locali restano salvati nel browser.',
+      );
+    } catch {
+      showToast(
+        lang === 'en' ? 'Sign-out failed.' : 'Errore durante la disconnessione.',
+      );
+    } finally {
+      setAuthBusy(false);
+    }
   };
 
   // Strict 5-strategy whitelist across all tabs and filters
@@ -235,25 +464,46 @@ export function App() {
     setBacktestTrades(nextBt);
     setLiveTrades(nextLive);
     setMissedTrades(nextMissed);
+
+    if (firebaseUser) {
+      const isExistingInCloud = cloudIdsRef.current.has(saved.id);
+      cloudIdsRef.current.add(saved.id);
+      void upsertTradeInFirestore(firebaseUser.uid, saved, isExistingInCloud).catch(
+        (err) => {
+          setFatalError(err instanceof Error ? err : new Error(String(err)));
+        },
+      );
+    }
+
     showToast(`${saved.asset} (${saved.setup}) — ${formatR(saved.netR)}`);
   };
 
   const handleConfirmDelete = () => {
     if (!deleteTarget) return;
-    if (deleteTarget.category === 'backtest') {
-      const next = backtestTrades.filter((x) => x.id !== deleteTarget.id);
+    const targetToDelete = deleteTarget;
+    if (targetToDelete.category === 'backtest') {
+      const next = backtestTrades.filter((x) => x.id !== targetToDelete.id);
       setBacktestTrades(next);
       saveTradesSafely('backtest', next);
-    } else if (deleteTarget.category === 'live') {
-      const next = liveTrades.filter((x) => x.id !== deleteTarget.id);
+    } else if (targetToDelete.category === 'live') {
+      const next = liveTrades.filter((x) => x.id !== targetToDelete.id);
       setLiveTrades(next);
       saveTradesSafely('live', next);
     } else {
-      const next = missedTrades.filter((x) => x.id !== deleteTarget.id);
+      const next = missedTrades.filter((x) => x.id !== targetToDelete.id);
       setMissedTrades(next);
       saveTradesSafely('missed', next);
     }
     setDeleteTarget(null);
+
+    if (firebaseUser) {
+      cloudIdsRef.current.delete(targetToDelete.id);
+      void deleteTradeInFirestore(firebaseUser.uid, targetToDelete.id).catch(
+        (err) => {
+          setFatalError(err instanceof Error ? err : new Error(String(err)));
+        },
+      );
+    }
   };
 
   const handleImportTrades = (imported: TradeRecord[]) => {
@@ -269,27 +519,29 @@ export function App() {
 
     const missedIncoming = addedTrades.filter((tr) => tr.category === 'missed');
     const primaryIncoming = addedTrades.filter((tr) => tr.category !== 'missed');
+    const tradesToSyncCloud: TradeRecord[] = [];
 
     if (primaryIncoming.length > 0) {
       if (importCategory === 'backtest') {
         const next = [...backtestTrades, ...primaryIncoming];
         setBacktestTrades(next);
         saveTradesSafely('backtest', next);
+        tradesToSyncCloud.push(...primaryIncoming);
       } else if (importCategory === 'live') {
         const next = [...liveTrades, ...primaryIncoming];
         setLiveTrades(next);
         saveTradesSafely('live', next);
+        tradesToSyncCloud.push(...primaryIncoming);
       } else {
-        const next = [
-          ...missedTrades,
-          ...primaryIncoming.map((t) => ({
-            ...t,
-            category: 'missed' as const,
-            isMissed: true,
-          })),
-        ];
+        const normalizedMissed = primaryIncoming.map((t) => ({
+          ...t,
+          category: 'missed' as const,
+          isMissed: true,
+        }));
+        const next = [...missedTrades, ...normalizedMissed];
         setMissedTrades(next);
         saveTradesSafely('missed', next);
+        tradesToSyncCloud.push(...normalizedMissed);
       }
     }
 
@@ -297,6 +549,16 @@ export function App() {
       const nextMissed = [...missedTrades, ...missedIncoming];
       setMissedTrades(nextMissed);
       saveTradesSafely('missed', nextMissed);
+      tradesToSyncCloud.push(...missedIncoming);
+    }
+
+    if (firebaseUser && tradesToSyncCloud.length > 0) {
+      tradesToSyncCloud.forEach((tr) => cloudIdsRef.current.add(tr.id));
+      void batchCreateTradesInFirestore(firebaseUser.uid, tradesToSyncCloud).catch(
+        (err) => {
+          setFatalError(err instanceof Error ? err : new Error(String(err)));
+        },
+      );
     }
 
     const perStrategy: Record<string, number> = {};
@@ -459,6 +721,12 @@ export function App() {
       const next = [...backtestTrades, ...samples];
       setBacktestTrades(next);
       saveTradesSafely('backtest', next);
+      if (firebaseUser) {
+        samples.forEach((tr) => cloudIdsRef.current.add(tr.id));
+        void batchCreateTradesInFirestore(firebaseUser.uid, samples).catch((err) => {
+          setFatalError(err instanceof Error ? err : new Error(String(err)));
+        });
+      }
       showToast('+6 operazioni di esempio aggiunte al Backtest');
     } else if (target === 'live') {
       const samples: TradeRecord[] = [
@@ -520,6 +788,12 @@ export function App() {
       const next = [...liveTrades, ...samples];
       setLiveTrades(next);
       saveTradesSafely('live', next);
+      if (firebaseUser) {
+        samples.forEach((tr) => cloudIdsRef.current.add(tr.id));
+        void batchCreateTradesInFirestore(firebaseUser.uid, samples).catch((err) => {
+          setFatalError(err instanceof Error ? err : new Error(String(err)));
+        });
+      }
       showToast('+3 operazioni di esempio aggiunte al Journal Reale');
     } else {
       const samples: TradeRecord[] = [
@@ -559,6 +833,12 @@ export function App() {
       const next = [...missedTrades, ...samples];
       setMissedTrades(next);
       saveTradesSafely('missed', next);
+      if (firebaseUser) {
+        samples.forEach((tr) => cloudIdsRef.current.add(tr.id));
+        void batchCreateTradesInFirestore(firebaseUser.uid, samples).catch((err) => {
+          setFatalError(err instanceof Error ? err : new Error(String(err)));
+        });
+      }
       showToast('+2 operazioni di esempio aggiunte ai Trade Non Presi');
     }
   };
@@ -631,7 +911,50 @@ export function App() {
             })}
           </nav>
 
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="flex items-center gap-2.5 shrink-0">
+            {authReady ? (
+              firebaseUser ? (
+                <div className="flex items-center gap-2 rounded-md border border-[#1E2634] bg-[#121721] px-2.5 py-1.5 text-xs">
+                  <Cloud
+                    className={`h-3.5 w-3.5 shrink-0 ${
+                      cloudSyncStatus === 'syncing'
+                        ? 'animate-pulse text-amber-400'
+                        : 'text-emerald-400'
+                    }`}
+                  />
+                  <span
+                    title={firebaseUser.email || firebaseUser.displayName || ''}
+                    className="hidden max-w-[140px] truncate font-medium text-slate-200 sm:inline"
+                  >
+                    {firebaseUser.email || firebaseUser.displayName || 'Cloud'}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={authBusy}
+                    onClick={() => void handleGoogleSignOut()}
+                    title={lang === 'en' ? 'Sign out' : 'Esci'}
+                    aria-label={lang === 'en' ? 'Sign out' : 'Esci'}
+                    className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-slate-400 transition-colors hover:bg-[#1A2230] hover:text-slate-100 disabled:opacity-50"
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    <span className="hidden md:inline">
+                      {lang === 'en' ? 'Sign Out' : 'Esci'}
+                    </span>
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  disabled={authBusy}
+                  onClick={() => void handleGoogleSignIn()}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-xs font-semibold text-sky-300 transition-colors hover:bg-sky-500/20 disabled:opacity-50 whitespace-nowrap shrink-0"
+                >
+                  <LogIn className="h-3.5 w-3.5" />
+                  <span>{lang === 'en' ? 'Google Sign-In' : 'Accedi Google'}</span>
+                </button>
+              )
+            ) : null}
+
             <div
               role="group"
               aria-label="Language switcher"
@@ -798,6 +1121,37 @@ export function App() {
                     saveTradesSafely('backtest', nextBt);
                     saveTradesSafely('live', nextLive);
                     saveTradesSafely('missed', nextMissed);
+
+                    if (firebaseUser) {
+                      const restoredAll = [
+                        ...restored.backtest,
+                        ...restored.live,
+                        ...restored.missed,
+                      ];
+                      const newToCloud: TradeRecord[] = [];
+                      const updateInCloud: TradeRecord[] = [];
+                      restoredAll.forEach((tr) => {
+                        if (cloudIdsRef.current.has(tr.id)) {
+                          updateInCloud.push(tr);
+                        } else {
+                          cloudIdsRef.current.add(tr.id);
+                          newToCloud.push(tr);
+                        }
+                      });
+                      try {
+                        if (newToCloud.length > 0) {
+                          await batchCreateTradesInFirestore(firebaseUser.uid, newToCloud);
+                        }
+                        for (const tr of updateInCloud) {
+                          await upsertTradeInFirestore(firebaseUser.uid, tr, true);
+                        }
+                      } catch (err) {
+                        setFatalError(
+                          err instanceof Error ? err : new Error(String(err)),
+                        );
+                      }
+                    }
+
                     showToast(
                       `Backup JSON importato: ${restored.backtest.length} Backtest, ${restored.live.length} Journal Reale, ${restored.missed.length} Non Presi.`,
                       6000,
