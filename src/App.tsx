@@ -29,7 +29,11 @@ import {
   runRowCalculationEngine,
 } from './utils/calculations';
 import { analizzaTradeConGemini, buildGeminiReviewPrompt } from './utils/geminiReview';
-import { exportBackupJson, exportTradesCsv } from './utils/importer';
+import {
+  exportBackupJson,
+  exportTradesCsv,
+  parseBackupJsonContent,
+} from './utils/importer';
 import {
   loadAllTradesSafely,
   loadLanguagePreference,
@@ -726,6 +730,57 @@ export function App() {
               <FileJson className="h-3.5 w-3.5 text-emerald-400" />
               {t.journal.exportJson}
             </button>
+
+            <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-[#263042] bg-[#121721] px-3.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-sky-500/50 whitespace-nowrap shrink-0">
+              <Upload className="h-3.5 w-3.5 text-emerald-400" />
+              <span>{t.journal.importJson}</span>
+              <input
+                type="file"
+                accept=".json,application/json"
+                className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = '';
+                  if (!file) return;
+                  try {
+                    const text = await file.text();
+                    const restored = parseBackupJsonContent(text);
+                    const total =
+                      restored.backtest.length +
+                      restored.live.length +
+                      restored.missed.length;
+                    if (total === 0) {
+                      showToast('Nessuna operazione valida trovata nel file JSON.');
+                      return;
+                    }
+                    const mergeById = (
+                      existing: TradeRecord[],
+                      incoming: TradeRecord[],
+                    ) => {
+                      const map = new Map<string, TradeRecord>();
+                      existing.forEach((tr) => map.set(tr.id, tr));
+                      incoming.forEach((tr) => map.set(tr.id, tr));
+                      return Array.from(map.values());
+                    };
+                    const nextBt = mergeById(backtestTrades, restored.backtest);
+                    const nextLive = mergeById(liveTrades, restored.live);
+                    const nextMissed = mergeById(missedTrades, restored.missed);
+                    setBacktestTrades(nextBt);
+                    setLiveTrades(nextLive);
+                    setMissedTrades(nextMissed);
+                    saveTradesSafely('backtest', nextBt);
+                    saveTradesSafely('live', nextLive);
+                    saveTradesSafely('missed', nextMissed);
+                    showToast(
+                      `Backup JSON importato: ${restored.backtest.length} Backtest, ${restored.live.length} Journal Reale, ${restored.missed.length} Non Presi.`,
+                      6000,
+                    );
+                  } catch {
+                    showToast('File JSON non valido o corrotto.');
+                  }
+                }}
+              />
+            </label>
 
             <button
               type="button"

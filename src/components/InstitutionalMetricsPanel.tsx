@@ -127,6 +127,71 @@ const LABELS = {
   },
 } as const;
 
+const MONTHS_SHORT: Record<Language, string[]> = {
+  it: ['Gen', 'Feb', 'Mar', 'Apr', 'Mag', 'Giu', 'Lug', 'Ago', 'Set', 'Ott', 'Nov', 'Dic'],
+  en: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+  es: ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'],
+};
+
+const MONTHS_FULL: Record<Language, string[]> = {
+  it: [
+    'Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno',
+    'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre',
+  ],
+  en: [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ],
+  es: [
+    'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+    'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre',
+  ],
+};
+
+const WEEKDAYS_SHORT: Record<Language, string[]> = {
+  it: ['Dom', 'Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab'],
+  en: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
+  es: ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'],
+};
+
+function formatPeriodLabels(
+  period: string,
+  mode: 'monthly' | 'daily',
+  lang: Language,
+): { primary: string; secondary?: string; full: string } {
+  const shortMonths = MONTHS_SHORT[lang] ?? MONTHS_SHORT.it;
+  const fullMonths = MONTHS_FULL[lang] ?? MONTHS_FULL.it;
+  const weekdays = WEEKDAYS_SHORT[lang] ?? WEEKDAYS_SHORT.it;
+
+  if (mode === 'monthly') {
+    const m = /^(\d{4})-(\d{2})$/.exec(period.trim());
+    if (!m) return { primary: period, full: period };
+    const monthIdx = Number(m[2]) - 1;
+    const shortName = shortMonths[monthIdx] ?? m[2];
+    const fullName = fullMonths[monthIdx] ?? m[2];
+    return {
+      primary: `${shortName} ${m[1]}`,
+      full: `${fullName} ${m[1]}`,
+    };
+  }
+
+  const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(period.trim());
+  if (!d) return { primary: period, full: period };
+  const year = Number(d[1]);
+  const monthIdx = Number(d[2]) - 1;
+  const day = Number(d[3]);
+  const shortName = shortMonths[monthIdx] ?? d[2];
+  const fullName = fullMonths[monthIdx] ?? d[2];
+  const dt = new Date(Date.UTC(year, monthIdx, day));
+  const wd = weekdays[dt.getUTCDay()] ?? '';
+  const dd = String(day).padStart(2, '0');
+  return {
+    primary: `${dd} ${shortName}`,
+    secondary: `${d[1]}`,
+    full: `${wd ? `${wd} ` : ''}${dd} ${fullName} ${d[1]}`,
+  };
+}
+
 export function InstitutionalMetricsPanel({
   stats,
   lang,
@@ -135,6 +200,7 @@ export function InstitutionalMetricsPanel({
   const [pnlMode, setPnlMode] = useState<'monthly' | 'daily'>('monthly');
   const [hoveredPeriod, setHoveredPeriod] = useState<{
     period: string;
+    displayLabel: string;
     netR: number;
     tradesCount: number;
   } | null>(null);
@@ -183,7 +249,7 @@ export function InstitutionalMetricsPanel({
         : '0.00';
 
   const buckets = pnlMode === 'monthly' ? stats.monthlyBuckets : stats.dailyBuckets;
-  const visibleBuckets = buckets.slice(-36);
+  const visibleBuckets = pnlMode === 'monthly' ? buckets : buckets.slice(-45);
   const maxAbsR = Math.max(1, ...visibleBuckets.map((b) => Math.abs(b.netR)));
 
   return (
@@ -434,7 +500,7 @@ export function InstitutionalMetricsPanel({
           <div className="flex items-center gap-3">
             {hoveredPeriod ? (
               <div className="rounded border border-[#263042] bg-[#0B0E14] px-2.5 py-1 font-mono text-xs tabular-nums">
-                <span className="text-slate-400">{hoveredPeriod.period}: </span>
+                <span className="text-slate-300">{hoveredPeriod.displayLabel}: </span>
                 <span
                   className={
                     hoveredPeriod.netR >= 0 ? 'font-bold text-emerald-400' : 'font-bold text-rose-400'
@@ -485,20 +551,31 @@ export function InstitutionalMetricsPanel({
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <div className="relative min-w-[460px] pt-2 pb-1">
-              <div className="relative flex h-44 items-stretch gap-1.5">
+            <div
+              className="relative pt-2 pb-1"
+              style={{
+                minWidth: `${Math.max(460, visibleBuckets.length * 64)}px`,
+              }}
+            >
+              <div className="relative flex h-44 items-stretch gap-2">
                 {/* Zero baseline */}
                 <div className="pointer-events-none absolute inset-x-0 top-1/2 border-t border-dashed border-slate-600/70" />
 
                 {visibleBuckets.map((b) => {
                   const pct = Math.max(10, Math.round((Math.abs(b.netR) / maxAbsR) * 86));
                   const positive = b.netR >= 0;
+                  const formatted = formatPeriodLabels(b.period, pnlMode, lang);
                   return (
                     <div
                       key={b.period}
-                      onMouseEnter={() => setHoveredPeriod(b)}
+                      onMouseEnter={() =>
+                        setHoveredPeriod({
+                          ...b,
+                          displayLabel: formatted.full,
+                        })
+                      }
                       onMouseLeave={() => setHoveredPeriod(null)}
-                      className="group relative flex flex-1 min-w-[26px] flex-col cursor-pointer"
+                      className="group relative flex flex-1 min-w-[56px] flex-col cursor-pointer"
                     >
                       {/* Top half: Positive bars */}
                       <div className="flex flex-1 flex-col items-center justify-end pb-0.5">
@@ -535,15 +612,22 @@ export function InstitutionalMetricsPanel({
               </div>
 
               {/* X-axis period labels */}
-              <div className="mt-2 flex gap-1.5 border-t border-[#1E2634] pt-2">
-                {visibleBuckets.map((b) => (
-                  <div
-                    key={`lbl_${b.period}`}
-                    className="flex-1 min-w-[26px] text-center font-mono text-[10px] text-slate-400 truncate"
-                  >
-                    {b.label}
-                  </div>
-                ))}
+              <div className="mt-2 flex gap-2 border-t border-[#1E2634] pt-2">
+                {visibleBuckets.map((b) => {
+                  const formatted = formatPeriodLabels(b.period, pnlMode, lang);
+                  return (
+                    <div
+                      key={`lbl_${b.period}`}
+                      title={formatted.full}
+                      className="flex flex-1 min-w-[56px] flex-col items-center text-center font-mono text-[10px] leading-tight text-slate-300 whitespace-nowrap"
+                    >
+                      <span>{formatted.primary}</span>
+                      {formatted.secondary ? (
+                        <span className="text-[9px] text-slate-500">{formatted.secondary}</span>
+                      ) : null}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>

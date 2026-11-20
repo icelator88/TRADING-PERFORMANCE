@@ -1,34 +1,37 @@
-# DiarioTrade — Mechanical Trading Journal
+# trading-performance
 
-Applicazione web standalone sviluppata con **Vite + React + TypeScript + Tailwind CSS** con persistenza automatica su `localStorage`.
+**Performance (DiarioTrade)** — Mechanical Trading Journal & Institutional Analytics platform built with React, TypeScript, Vite, Tailwind CSS, and SheetJS (`xlsx`), configured for static deployment on **GitHub Pages** (`base: './'`).
 
-## Caratteristiche Principali
+**Live URL (GitHub Pages):** `https://<username>.github.io/trading-performance/`
 
-- **Interfaccia 100% in Italiano** con 4 viste dedicate: `Dashboard`, `Backtest`, `Journal Reale` e `Trade Non Presi`.
-- **5 Strategie Fisse (Whitelist Stretta)**: `S1`, `SSA`, `MUT`, `SBIL DOMINANCE REALE`, `SBIL INTRADOMINANCE`.
-- **Importer Multi-Asset Excel (`.xlsx` / `.xls`) & `.csv` (SheetJS)**:
-  - Riconoscimento automatico dell'asset dal nome del file (`CHF/JPY`, `EUR/USD`, `XAU/USD`, `US30`, `NASDAQ`, ecc.) con filtro Asset dedicato.
-  - Mappatura posizionale rigorosa delle colonne `0–11` (`DATA`/`Colonna 1`, `GIORNO`, `SESSIONE`, `ORARIO`, `BIAS`, `OVERNIGHT`, `NOTE`, `ESITO`, `R`, `RR MAX`, `R PROGRESSIVI`, `LINK`), ignorando automaticamente eventuali tabelle di riepilogo a destra (`12+`).
-  - Assegnazione sequenziale automatica dei 5 blocchi verticali o dei fogli Excel alle 5 strategie ufficiali.
-- **Separazione Rigorosa Conto Reale vs Trade Non Presi**:
-  - Qualsiasi operazione con `ESITO = UNFILLED` o con `NON PRESO` nelle note viene esclusa al 100% dalle statistiche reali (Win Rate %, R:R Netto, Profit Factor, Curva Equity) e instradata nella sezione **Trade Non Presi**.
-- **Backup & Sicurezza Dati**:
-  - Persistenza locale in `localStorage`.
-  - Pulsanti dedicati per **Esporta Backup CSV**, **Esporta Backup JSON** e **Resetta Dati** con conferma di sicurezza.
+---
 
-## Avvio in Locale
+## Core Modules
+- **Dashboard & Confronto**: Side-by-side performance matrix comparing **Backtest** vs **Journal Reale** vs **Trade Non Presi**, Plan Adherence Score %, dual Equity Curve, and **AKINATOR — Scansione Completa Backtest**.
+- **Backtest**: Isolated historical strategy database, Equity Curve, **Curva del Drawdown (R)**, institutional metrics, and multi-sheet Excel/CSV/PDF importer.
+- **Journal Reale (Live Journaling)**: Executed live account statistics strictly excluding any `NON PRESO` / `MISSED` / `UNFILLED` trades.
+- **Trade Non Presi**: Dedicated tracking of missed setups with psychological/operational reason breakdown and theoretical lost R.
+- **Institutional Risk-Adjusted Metrics**: Profit Factor, Expectancy per Trade, CAGR %, Payoff Ratio (R:R), Max Consecutive Wins/Losses, Sharpe Ratio, Sortino Ratio, Calmar Ratio, Recovery Factor, Estimated Risk of Ruin (20R), and Monthly/Daily PnL distribution.
 
+---
+
+## Deploy on GitHub Pages
+This project includes `base: './'` in `vite.config.ts` and a ready-to-use GitHub Actions workflow in `.github/workflows/deploy.yml`:
+
+1. Push this repository to GitHub on the `main` branch.
+2. Open **Settings → Pages** in your GitHub repository.
+3. Under **Build and deployment → Source**, select **GitHub Actions**.
+4. Every push to `main` automatically runs `npm ci && npm run build` and deploys `./dist` to `https://<username>.github.io/trading-performance/`.
+
+---
+
+## Local Development
 ```bash
 npm install
 npm run dev
 ```
 
-L'applicazione sarà disponibile su `http://localhost:3000`.
-
-## Build per Deploy Web Statico
-
-```bash
-npm run build
-```
-
-I file pronti per il deploy verranno generati nella cartella `dist/` (compatibile con Vercel, Netlify, Cloudflare Pages o qualsiasi hosting statico).
+## Backup & Data Transfer (`localStorage`)
+All trades persist automatically in browser `localStorage` (`diariotrade_backtest_v1`, `diariotrade_live_v1`, `diariotrade_missed_v1`).
+- Use **Esporta Backup JSON** (`Export Backup JSON`) to download your complete Backtest, Journal Reale, and Trade Non Presi backup.
+- Use **Importa Backup JSON** (`Import Backup JSON`) to restore your data on GitHub Pages or across browsers/devices.

@@ -65,6 +65,7 @@ export interface TranslationSet {
     importFile: string;
     exportCsv: string;
     exportJson: string;
+    importJson: string;
     resetData: string;
     geminiReview: string;
     searchPlaceholder: string;
@@ -233,6 +234,7 @@ export const TRANSLATIONS: Record<Language, TranslationSet> = {
       importFile: 'Import File (.xlsx / .csv)',
       exportCsv: 'Export Backup CSV',
       exportJson: 'Export Backup JSON',
+      importJson: 'Import Backup JSON',
       resetData: 'Reset Data',
       geminiReview: 'AI Review (Gemini)',
       searchPlaceholder: 'Search asset, setup, notes...',
@@ -399,6 +401,7 @@ export const TRANSLATIONS: Record<Language, TranslationSet> = {
       importFile: 'Importa File (.xlsx / .csv)',
       exportCsv: 'Esporta Backup CSV',
       exportJson: 'Esporta Backup JSON',
+      importJson: 'Importa Backup JSON',
       resetData: 'Resetta Dati',
       geminiReview: 'Revisione AI (Gemini)',
       searchPlaceholder: 'Cerca asset, strategia, note...',
@@ -565,6 +568,7 @@ export const TRANSLATIONS: Record<Language, TranslationSet> = {
       importFile: 'Importar Archivo (.xlsx / .csv / .pdf)',
       exportCsv: 'Exportar Backup CSV',
       exportJson: 'Exportar Backup JSON',
+      importJson: 'Importar Backup JSON',
       resetData: 'Restablecer Datos',
       geminiReview: 'Revisión AI (Gemini)',
       searchPlaceholder: 'Buscar activo, setup, notas...',

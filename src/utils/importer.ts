@@ -750,3 +750,118 @@ export function exportBackupJson(
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
+
+function normalizeRestoredTrade(
+  raw: Record<string, unknown>,
+  fallbackCategory: TradeCategory,
+  idx: number,
+): TradeRecord | null {
+  const asset = String(raw.asset ?? raw.pair ?? raw.ticker ?? '').trim().toUpperCase();
+  const date = normalizeImportDate(raw.date ?? raw.data);
+  if (!asset || !date) return null;
+
+  const category: TradeCategory =
+    raw.category === 'backtest' || raw.category === 'live' || raw.category === 'missed'
+      ? raw.category
+      : fallbackCategory;
+  const setup = normalizeSetupName(String(raw.setup ?? raw.strategy ?? 'S1'));
+  const biasRaw = String(raw.bias ?? raw.direction ?? 'LONG').toUpperCase();
+  const bias = biasRaw === 'SHORT' ? 'SHORT' : 'LONG';
+  const outcome = normalizeOutcome(String(raw.outcome ?? 'BE'));
+  const netRNum = Number(raw.netR ?? raw.rMultiple ?? 0);
+  const riskNum = Number(raw.riskPct ?? 1);
+  const netR = Number.isFinite(netRNum) ? roundTo(netRNum, 2) : 0;
+  const riskPct = Number.isFinite(riskNum) && riskNum >= 0 ? riskNum : 1;
+
+  return runRowCalculationEngine({
+    id: typeof raw.id === 'string' && raw.id ? raw.id : generateTradeId(category.slice(0, 2)),
+    category,
+    date,
+    day: typeof raw.day === 'string' ? raw.day : undefined,
+    session: typeof raw.session === 'string' ? raw.session : undefined,
+    entryTime: typeof raw.entryTime === 'string' ? raw.entryTime : undefined,
+    exitTime: typeof raw.exitTime === 'string' ? raw.exitTime : undefined,
+    asset,
+    setup,
+    strategy: setup,
+    isMissed: category === 'missed' || Boolean(raw.isMissed),
+    bias,
+    riskPct,
+    entryPrice: typeof raw.entryPrice === 'number' ? raw.entryPrice : null,
+    slPrice: typeof raw.slPrice === 'number' ? raw.slPrice : null,
+    tpPrice: typeof raw.tpPrice === 'number' ? raw.tpPrice : null,
+    slPips: typeof raw.slPips === 'number' ? raw.slPips : null,
+    tpPips: typeof raw.tpPips === 'number' ? raw.tpPips : null,
+    targetRR: typeof raw.targetRR === 'number' ? raw.targetRR : null,
+    outcome,
+    netR,
+    rrMax: typeof raw.rrMax === 'number' ? raw.rrMax : null,
+    netReturnPct: roundTo(netR * riskPct, 2),
+    missedReason:
+      category === 'missed'
+        ? String(raw.missedReason ?? '').trim() || MISSED_REASONS[0]
+        : undefined,
+    notes: typeof raw.notes === 'string' ? raw.notes : '',
+    tradingViewUrl: typeof raw.tradingViewUrl === 'string' ? raw.tradingViewUrl : '',
+    extraColumns:
+      raw.extraColumns && typeof raw.extraColumns === 'object' && !Array.isArray(raw.extraColumns)
+        ? (raw.extraColumns as Record<string, string>)
+        : undefined,
+    createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : Date.now() + idx,
+  });
+}
+
+export function parseBackupJsonContent(rawText: string): {
+  backtest: TradeRecord[];
+  live: TradeRecord[];
+  missed: TradeRecord[];
+} {
+  const parsed = JSON.parse(rawText) as unknown;
+  const backtest: TradeRecord[] = [];
+  const live: TradeRecord[] = [];
+  const missed: TradeRecord[] = [];
+
+  if (Array.isArray(parsed)) {
+    parsed.forEach((item, idx) => {
+      if (!item || typeof item !== 'object') return;
+      const tr = normalizeRestoredTrade(item as Record<string, unknown>, 'backtest', idx);
+      if (!tr) return;
+      if (tr.category === 'backtest') backtest.push(tr);
+      else if (tr.category === 'missed') missed.push(tr);
+      else live.push(tr);
+    });
+    return { backtest, live, missed };
+  }
+
+  if (parsed && typeof parsed === 'object') {
+    const obj = parsed as Record<string, unknown>;
+    const btArr = Array.isArray(obj.backtest) ? obj.backtest : [];
+    const liveArr = Array.isArray(obj.live)
+      ? obj.live
+      : Array.isArray(obj.trades)
+        ? obj.trades
+        : [];
+    const missedArr = Array.isArray(obj.missed) ? obj.missed : [];
+
+    btArr.forEach((item, idx) => {
+      if (item && typeof item === 'object') {
+        const tr = normalizeRestoredTrade(item as Record<string, unknown>, 'backtest', idx);
+        if (tr) backtest.push(tr);
+      }
+    });
+    liveArr.forEach((item, idx) => {
+      if (item && typeof item === 'object') {
+        const tr = normalizeRestoredTrade(item as Record<string, unknown>, 'live', idx);
+        if (tr) live.push(tr);
+      }
+    });
+    missedArr.forEach((item, idx) => {
+      if (item && typeof item === 'object') {
+        const tr = normalizeRestoredTrade(item as Record<string, unknown>, 'missed', idx);
+        if (tr) missed.push(tr);
+      }
+    });
+  }
+
+  return { backtest, live, missed };
+}
