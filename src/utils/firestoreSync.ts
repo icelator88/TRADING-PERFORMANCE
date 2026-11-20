@@ -15,7 +15,7 @@ import {
   type Unsubscribe,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import type { TradeCategory, TradeRecord } from '../types/trading';
+import type { ActiveTab, Language, TradeCategory, TradeRecord } from '../types/trading';
 import {
   normalizeOutcome,
   normalizeSetupName,
@@ -24,6 +24,15 @@ import {
   todayIsoDate,
 } from './calculations';
 import { normalizeImportDate, normalizeImportTime } from './importer';
+
+export interface CloudUserSettings {
+  language: Language;
+  activeTab: ActiveTab;
+  selectedSetup: string;
+  assetFilter: string;
+}
+
+const SETTINGS_DOC_ID = 'preferences';
 
 function sanitizeId(rawId: string, fallbackPrefix = 'tr'): string {
   const cleaned = String(rawId || '')
@@ -45,8 +54,11 @@ export async function ensureUserProfile(user: User): Promise<void> {
 
   try {
     const snap = await getDoc(ref);
-    const displayName = (user.displayName || 'Trader').trim().slice(0, 120);
     const email = (user.email || '').trim().slice(0, 200);
+    const fallbackName = email ? email.split('@')[0] : 'Trader';
+    const displayName = (user.displayName || fallbackName || 'Trader')
+      .trim()
+      .slice(0, 120);
 
     if (!snap.exists()) {
       await setDoc(ref, {
@@ -68,6 +80,97 @@ export async function ensureUserProfile(user: User): Promise<void> {
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+function sanitizeSettingsPayload(
+  settings: CloudUserSettings,
+): CloudUserSettings {
+  const language: Language =
+    settings.language === 'en' || settings.language === 'es' ? settings.language : 'it';
+  const activeTab: ActiveTab =
+    settings.activeTab === 'backtest' ||
+    settings.activeTab === 'live' ||
+    settings.activeTab === 'missed'
+      ? settings.activeTab
+      : 'dashboard';
+  const selectedSetup = (settings.selectedSetup || 'ALL').trim().slice(0, 40) || 'ALL';
+  const assetFilter = (settings.assetFilter || 'ALL').trim().slice(0, 32) || 'ALL';
+
+  return { language, activeTab, selectedSetup, assetFilter };
+}
+
+export function subscribeUserSettings(
+  uid: string,
+  onSettings: (settings: CloudUserSettings | null) => void,
+  onError?: (error: Error) => void,
+): Unsubscribe {
+  const safeUid = sanitizeId(uid, 'user');
+  const docPath = `users/${safeUid}/settings/${SETTINGS_DOC_ID}`;
+  const ref = doc(db, 'users', safeUid, 'settings', SETTINGS_DOC_ID);
+
+  return onSnapshot(
+    ref,
+    (snapshot) => {
+      if (!snapshot.exists()) {
+        onSettings(null);
+        return;
+      }
+      const data = snapshot.data() as Record<string, unknown>;
+      onSettings(
+        sanitizeSettingsPayload({
+          language: (data.language as Language) || 'it',
+          activeTab: (data.activeTab as ActiveTab) || 'dashboard',
+          selectedSetup: String(data.selectedSetup ?? 'ALL'),
+          assetFilter: String(data.assetFilter ?? 'ALL'),
+        }),
+      );
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.GET, docPath);
+      } catch (wrapped) {
+        if (onError && wrapped instanceof Error) {
+          onError(wrapped);
+        }
+      }
+    },
+  );
+}
+
+export async function saveUserSettingsInFirestore(
+  uid: string,
+  settings: CloudUserSettings,
+): Promise<void> {
+  const safeUid = sanitizeId(uid, 'user');
+  const docPath = `users/${safeUid}/settings/${SETTINGS_DOC_ID}`;
+  const ref = doc(db, 'users', safeUid, 'settings', SETTINGS_DOC_ID);
+  const clean = sanitizeSettingsPayload(settings);
+
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) {
+      await setDoc(ref, {
+        id: SETTINGS_DOC_ID,
+        ownerId: safeUid,
+        language: clean.language,
+        activeTab: clean.activeTab,
+        selectedSetup: clean.selectedSetup,
+        assetFilter: clean.assetFilter,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(ref, {
+        language: clean.language,
+        activeTab: clean.activeTab,
+        selectedSetup: clean.selectedSetup,
+        assetFilter: clean.assetFilter,
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, docPath);
   }
 }
 

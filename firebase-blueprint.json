@@ -14,13 +14,13 @@
         },
         "displayName": {
           "type": "string",
-          "description": "User display name from Google Auth.",
+          "description": "User display name or email prefix.",
           "maxLength": 120
         },
         "email": {
           "type": "string",
           "format": "email",
-          "description": "Verified email address of the user.",
+          "description": "Authenticated email address of the user.",
           "maxLength": 200
         },
         "createdAt": {
@@ -35,6 +35,65 @@
         }
       },
       "required": ["uid", "displayName", "email", "createdAt", "updatedAt"]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "Per-user application preferences and active workspace filters synced under users/{userId}/settings.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Settings document identifier (e.g., preferences).",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "language": {
+          "type": "string",
+          "enum": ["it", "en", "es"],
+          "maxLength": 8
+        },
+        "activeTab": {
+          "type": "string",
+          "enum": ["dashboard", "backtest", "live", "missed"],
+          "maxLength": 16
+        },
+        "selectedSetup": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "assetFilter": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "language",
+        "activeTab",
+        "selectedSetup",
+        "assetFilter",
+        "createdAt",
+        "updatedAt"
+      ]
     },
     "Trade": {
       "title": "Trade",
@@ -192,6 +251,10 @@
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
       "description": "Private user profile document acting as the root parent for the user's trading journal subcollections."
+    },
+    "/users/{userId}/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/UserSettings" },
+      "description": "Per-user application preferences (language, active tab, default filters)."
     },
     "/users/{userId}/trades/{tradeId}": {
       "schema": { "$ref": "#/entities/Trade" },

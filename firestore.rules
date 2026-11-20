@@ -24,8 +24,8 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isVerifiedUser() {
-      return isSignedIn() && request.auth.token.email_verified == true;
+    function isAuthenticatedAccount() {
+      return isSignedIn() && request.auth.token.firebase.sign_in_provider != 'anonymous';
     }
 
     function isOwner(userId) {
@@ -46,6 +46,37 @@ service cloud.firestore {
         && data.displayName.size() <= 120
         && data.email is string
         && data.email.size() <= 200
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserSettings(data, userId, settingId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'language', 'activeTab', 'selectedSetup', 'assetFilter',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'language', 'activeTab', 'selectedSetup', 'assetFilter',
+          'createdAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == settingId
+        && isValidId(data.id)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.language is string
+        && data.language.size() <= 8
+        && data.language in ['it', 'en', 'es']
+        && data.activeTab is string
+        && data.activeTab.size() <= 16
+        && data.activeTab in ['dashboard', 'backtest', 'live', 'missed']
+        && data.selectedSetup is string
+        && data.selectedSetup.size() >= 1
+        && data.selectedSetup.size() <= 40
+        && data.assetFilter is string
+        && data.assetFilter.size() >= 1
+        && data.assetFilter.size() <= 32
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -136,13 +167,13 @@ service cloud.firestore {
     match /users/{userId} {
       allow get: if isValidId(userId) && isOwner(userId);
       allow list: if false;
-      allow create: if isVerifiedUser()
+      allow create: if isAuthenticatedAccount()
         && isValidId(userId)
         && isOwner(userId)
         && isValidUserProfile(incoming(), userId)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isVerifiedUser()
+      allow update: if isAuthenticatedAccount()
         && isValidId(userId)
         && isOwner(userId)
         && isValidUserProfile(incoming(), userId)
@@ -150,7 +181,43 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'updatedAt']);
-      allow delete: if isVerifiedUser() && isValidId(userId) && isOwner(userId);
+      allow delete: if isAuthenticatedAccount() && isValidId(userId) && isOwner(userId);
+
+      match /settings/{settingId} {
+        allow get: if isValidId(userId)
+          && isValidId(settingId)
+          && isOwner(userId)
+          && parentUserExists(userId);
+        allow list: if isValidId(userId)
+          && isOwner(userId)
+          && resource.data.ownerId == request.auth.uid;
+        allow create: if isAuthenticatedAccount()
+          && isValidId(userId)
+          && isValidId(settingId)
+          && isOwner(userId)
+          && isValidUserSettings(incoming(), userId, settingId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && parentUserExists(userId);
+        allow update: if isAuthenticatedAccount()
+          && isValidId(userId)
+          && isValidId(settingId)
+          && isOwner(userId)
+          && isValidUserSettings(incoming(), userId, settingId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && parentUserExists(userId)
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'language', 'activeTab', 'selectedSetup', 'assetFilter', 'updatedAt'
+          ]);
+        allow delete: if isAuthenticatedAccount()
+          && isValidId(userId)
+          && isValidId(settingId)
+          && isOwner(userId)
+          && parentUserExists(userId);
+      }
 
       match /trades/{tradeId} {
         allow get: if isValidId(userId)
@@ -160,7 +227,7 @@ service cloud.firestore {
         allow list: if isValidId(userId)
           && isOwner(userId)
           && resource.data.ownerId == request.auth.uid;
-        allow create: if isVerifiedUser()
+        allow create: if isAuthenticatedAccount()
           && isValidId(userId)
           && isValidId(tradeId)
           && isOwner(userId)
@@ -168,7 +235,7 @@ service cloud.firestore {
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time
           && parentUserExists(userId);
-        allow update: if isVerifiedUser()
+        allow update: if isAuthenticatedAccount()
           && isValidId(userId)
           && isValidId(tradeId)
           && isOwner(userId)
@@ -185,7 +252,7 @@ service cloud.firestore {
             'outcome', 'netR', 'rrMax', 'netReturnPct', 'missedReason',
             'notes', 'tradingViewUrl', 'extraColumns', 'updatedAt'
           ]);
-        allow delete: if isVerifiedUser()
+        allow delete: if isAuthenticatedAccount()
           && isValidId(userId)
           && isValidId(tradeId)
           && isOwner(userId)

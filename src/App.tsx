@@ -3,7 +3,6 @@ import {
   Cloud,
   Download,
   FileJson,
-  LogIn,
   LogOut,
   RotateCcw,
   Sparkles,
@@ -17,10 +16,11 @@ import { EquityChart } from './components/EquityChart';
 import { GeminiModal } from './components/GeminiModal';
 import { ImportModal } from './components/ImportModal';
 import { InstitutionalMetricsPanel } from './components/InstitutionalMetricsPanel';
+import { LoginScreen } from './components/LoginScreen';
 import { SetupFilterBar } from './components/SetupFilterBar';
 import { TradeModal } from './components/TradeModal';
 import { TradeTable } from './components/TradeTable';
-import { auth, signInWithGooglePopup, signOutFirebase } from './firebase';
+import { auth, signOutFirebase } from './firebase';
 import { TRANSLATIONS } from './i18n/translations';
 import {
   type ActiveTab,
@@ -41,8 +41,11 @@ import {
 } from './utils/calculations';
 import {
   batchCreateTradesInFirestore,
+  type CloudUserSettings,
   deleteTradeInFirestore,
   ensureUserProfile,
+  saveUserSettingsInFirestore,
+  subscribeUserSettings,
   subscribeUserTrades,
   upsertTradeInFirestore,
 } from './utils/firestoreSync';
@@ -61,21 +64,17 @@ import {
   saveTradesSafely,
 } from './utils/storage';
 
-export function App() {
-  const initialLoaded = useMemo(() => loadAllTradesSafely(), []);
+const LAST_UID_STORAGE_KEY = 'diariotrade_last_uid_v1';
 
+export function App() {
   const [lang, setLang] = useState<Language>(() => loadLanguagePreference());
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
   const [selectedSetup, setSelectedSetup] = useState<string>('ALL');
   const [assetFilter, setAssetFilter] = useState<string>('ALL');
 
-  const [backtestTrades, setBacktestTrades] = useState<TradeRecord[]>(
-    initialLoaded.backtest,
-  );
-  const [liveTrades, setLiveTrades] = useState<TradeRecord[]>(initialLoaded.live);
-  const [missedTrades, setMissedTrades] = useState<TradeRecord[]>(
-    initialLoaded.missed,
-  );
+  const [backtestTrades, setBacktestTrades] = useState<TradeRecord[]>([]);
+  const [liveTrades, setLiveTrades] = useState<TradeRecord[]>([]);
+  const [missedTrades, setMissedTrades] = useState<TradeRecord[]>([]);
 
   // Filters
   const [searchQuery, setSearchQuery] = useState('');
@@ -115,21 +114,21 @@ export function App() {
 
   const cloudIdsRef = useRef<Set<string>>(new Set());
   const initialSyncDoneRef = useRef<boolean>(false);
-  const backtestRef = useRef<TradeRecord[]>(backtestTrades);
-  const liveRef = useRef<TradeRecord[]>(liveTrades);
-  const missedRef = useRef<TradeRecord[]>(missedTrades);
+  const settingsRef = useRef<CloudUserSettings>({
+    language: lang,
+    activeTab,
+    selectedSetup,
+    assetFilter,
+  });
 
   useEffect(() => {
-    backtestRef.current = backtestTrades;
-  }, [backtestTrades]);
-
-  useEffect(() => {
-    liveRef.current = liveTrades;
-  }, [liveTrades]);
-
-  useEffect(() => {
-    missedRef.current = missedTrades;
-  }, [missedTrades]);
+    settingsRef.current = {
+      language: lang,
+      activeTab,
+      selectedSetup,
+      assetFilter,
+    };
+  }, [lang, activeTab, selectedSetup, assetFilter]);
 
   if (fatalError) {
     throw fatalError;
@@ -137,9 +136,38 @@ export function App() {
 
   const t = TRANSLATIONS[lang];
 
+  const syncSettingsPatch = (patch: Partial<CloudUserSettings>) => {
+    const nextSettings: CloudUserSettings = {
+      ...settingsRef.current,
+      ...patch,
+    };
+    settingsRef.current = nextSettings;
+    if (firebaseUser) {
+      void saveUserSettingsInFirestore(firebaseUser.uid, nextSettings).catch((err) => {
+        setFatalError(err instanceof Error ? err : new Error(String(err)));
+      });
+    }
+  };
+
   const handleLanguageChange = (nextLang: Language) => {
     setLang(nextLang);
     saveLanguagePreference(nextLang);
+    syncSettingsPatch({ language: nextLang });
+  };
+
+  const handleTabChange = (nextTab: ActiveTab) => {
+    setActiveTab(nextTab);
+    syncSettingsPatch({ activeTab: nextTab });
+  };
+
+  const handleSetupChange = (nextSetup: string) => {
+    setSelectedSetup(nextSetup);
+    syncSettingsPatch({ selectedSetup: nextSetup });
+  };
+
+  const handleAssetFilterChange = (nextAsset: string) => {
+    setAssetFilter(nextAsset);
+    syncSettingsPatch({ assetFilter: nextAsset });
   };
 
   const showToast = (msg: string, duration = 4500) => {
@@ -168,16 +196,22 @@ export function App() {
   useEffect(() => {
     let active = true;
     let unsubTrades: (() => void) | null = null;
+    let unsubSettings: (() => void) | null = null;
 
     const unsubAuth = onAuthStateChanged(auth, async (user) => {
       unsubTrades?.();
       unsubTrades = null;
+      unsubSettings?.();
+      unsubSettings = null;
 
       if (!active) return;
 
       if (!user) {
         initialSyncDoneRef.current = false;
         cloudIdsRef.current.clear();
+        setBacktestTrades([]);
+        setLiveTrades([]);
+        setMissedTrades([]);
         setFirebaseUser(null);
         setCloudSyncStatus('idle');
         setAuthReady(true);
@@ -200,6 +234,37 @@ export function App() {
 
       if (!active) return;
 
+      let settingsInitialized = false;
+      unsubSettings = subscribeUserSettings(
+        user.uid,
+        async (cloudSettings) => {
+          if (!active) return;
+          if (!cloudSettings) {
+            if (!settingsInitialized) {
+              settingsInitialized = true;
+              try {
+                await saveUserSettingsInFirestore(user.uid, settingsRef.current);
+              } catch (err) {
+                if (active) {
+                  setFatalError(err instanceof Error ? err : new Error(String(err)));
+                }
+              }
+            }
+            return;
+          }
+          settingsInitialized = true;
+          settingsRef.current = cloudSettings;
+          setLang(cloudSettings.language);
+          saveLanguagePreference(cloudSettings.language);
+          setActiveTab(cloudSettings.activeTab);
+          setSelectedSetup(cloudSettings.selectedSetup);
+          setAssetFilter(cloudSettings.assetFilter);
+        },
+        (err) => {
+          if (active) setFatalError(err);
+        },
+      );
+
       unsubTrades = subscribeUserTrades(
         user.uid,
         async (cloudTrades) => {
@@ -209,11 +274,25 @@ export function App() {
 
           if (!initialSyncDoneRef.current) {
             initialSyncDoneRef.current = true;
+
+            let previousUid: string | null = null;
+            try {
+              previousUid = localStorage.getItem(LAST_UID_STORAGE_KEY);
+              localStorage.setItem(LAST_UID_STORAGE_KEY, user.uid);
+            } catch {
+              previousUid = null;
+            }
+
+            const canMigrateLocal = !previousUid || previousUid === user.uid;
+            const localLoaded = canMigrateLocal
+              ? loadAllTradesSafely()
+              : { backtest: [], live: [], missed: [] };
             const localAll = [
-              ...backtestRef.current,
-              ...liveRef.current,
-              ...missedRef.current,
+              ...localLoaded.backtest,
+              ...localLoaded.live,
+              ...localLoaded.missed,
             ];
+
             const cloudDupKeys = new Set(
               cloudTrades.map((tr) => `${tr.category}|${buildTradeDuplicateKey(tr)}`),
             );
@@ -277,57 +356,23 @@ export function App() {
     return () => {
       active = false;
       unsubTrades?.();
+      unsubSettings?.();
       unsubAuth();
     };
   }, []);
 
-  const handleGoogleSignIn = async () => {
-    setAuthBusy(true);
-    try {
-      await signInWithGooglePopup();
-      showToast(
-        lang === 'en'
-          ? 'Google Sign-In completed. Cloud sync active.'
-          : 'Accesso Google completato. Sincronizzazione cloud attiva.',
-      );
-    } catch (err) {
-      const code =
-        typeof err === 'object' && err && 'code' in err
-          ? String((err as { code?: unknown }).code ?? '')
-          : '';
-      if (
-        code === 'auth/popup-closed-by-user' ||
-        code === 'auth/cancelled-popup-request'
-      ) {
-        showToast(
-          lang === 'en'
-            ? 'Google sign-in popup closed.'
-            : 'Finestra di accesso Google chiusa.',
-        );
-      } else {
-        showToast(
-          lang === 'en'
-            ? 'Google sign-in failed. Allow popups or verify Firebase Auth configuration.'
-            : 'Accesso Google non riuscito. Consenti i popup o verifica Firebase Auth.',
-        );
-      }
-    } finally {
-      setAuthBusy(false);
-    }
-  };
-
-  const handleGoogleSignOut = async () => {
+  const handleLogout = async () => {
     setAuthBusy(true);
     try {
       await signOutFirebase();
-      showToast(
-        lang === 'en'
-          ? 'Signed out. Local data remains preserved in browser storage.'
-          : 'Disconnesso. I dati locali restano salvati nel browser.',
-      );
+      setTradeModalOpen(false);
+      setImportModalOpen(false);
+      setDeleteTarget(null);
+      setClearStorageConfirmOpen(false);
+      setGeminiState((prev) => ({ ...prev, isOpen: false }));
     } catch {
       showToast(
-        lang === 'en' ? 'Sign-out failed.' : 'Errore durante la disconnessione.',
+        lang === 'en' ? 'Logout failed.' : 'Errore durante il logout.',
       );
     } finally {
       setAuthBusy(false);
@@ -868,6 +913,27 @@ export function App() {
 
   const executionDeltaR = roundTo(liveStats.netR - backtestStats.netR, 2);
 
+  if (!authReady) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#0B0E14] text-slate-300">
+        <div className="flex items-center gap-3 rounded-lg border border-[#1E2634] bg-[#121721] px-5 py-3 text-xs font-medium">
+          <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-sky-400 border-t-transparent" />
+          <span>
+            {lang === 'en'
+              ? 'Verifying authentication...'
+              : 'Verifica sessione in corso...'}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!firebaseUser) {
+    return (
+      <LoginScreen lang={lang} onLanguageChange={handleLanguageChange} />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0B0E14] text-slate-100 flex flex-col">
       {/* Sticky Top Bar (3-Zone Contract) */}
@@ -877,7 +943,7 @@ export function App() {
             href="#dashboard"
             onClick={(e) => {
               e.preventDefault();
-              setActiveTab('dashboard');
+              handleTabChange('dashboard');
             }}
             className="text-lg font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0"
           >
@@ -898,7 +964,7 @@ export function App() {
                 <button
                   key={tabId}
                   type="button"
-                  onClick={() => setActiveTab(tabId)}
+                  onClick={() => handleTabChange(tabId)}
                   className={`border-b-2 py-1.5 text-sm transition-colors whitespace-nowrap shrink-0 ${
                     active
                       ? 'border-sky-400 font-semibold text-slate-100'
@@ -912,48 +978,32 @@ export function App() {
           </nav>
 
           <div className="flex items-center gap-2.5 shrink-0">
-            {authReady ? (
-              firebaseUser ? (
-                <div className="flex items-center gap-2 rounded-md border border-[#1E2634] bg-[#121721] px-2.5 py-1.5 text-xs">
-                  <Cloud
-                    className={`h-3.5 w-3.5 shrink-0 ${
-                      cloudSyncStatus === 'syncing'
-                        ? 'animate-pulse text-amber-400'
-                        : 'text-emerald-400'
-                    }`}
-                  />
-                  <span
-                    title={firebaseUser.email || firebaseUser.displayName || ''}
-                    className="hidden max-w-[140px] truncate font-medium text-slate-200 sm:inline"
-                  >
-                    {firebaseUser.email || firebaseUser.displayName || 'Cloud'}
-                  </span>
-                  <button
-                    type="button"
-                    disabled={authBusy}
-                    onClick={() => void handleGoogleSignOut()}
-                    title={lang === 'en' ? 'Sign out' : 'Esci'}
-                    aria-label={lang === 'en' ? 'Sign out' : 'Esci'}
-                    className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-slate-400 transition-colors hover:bg-[#1A2230] hover:text-slate-100 disabled:opacity-50"
-                  >
-                    <LogOut className="h-3.5 w-3.5" />
-                    <span className="hidden md:inline">
-                      {lang === 'en' ? 'Sign Out' : 'Esci'}
-                    </span>
-                  </button>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  disabled={authBusy}
-                  onClick={() => void handleGoogleSignIn()}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-xs font-semibold text-sky-300 transition-colors hover:bg-sky-500/20 disabled:opacity-50 whitespace-nowrap shrink-0"
-                >
-                  <LogIn className="h-3.5 w-3.5" />
-                  <span>{lang === 'en' ? 'Google Sign-In' : 'Accedi Google'}</span>
-                </button>
-              )
-            ) : null}
+            <div className="flex items-center gap-2 rounded-md border border-[#1E2634] bg-[#121721] px-2.5 py-1.5 text-xs">
+              <Cloud
+                className={`h-3.5 w-3.5 shrink-0 ${
+                  cloudSyncStatus === 'syncing'
+                    ? 'animate-pulse text-amber-400'
+                    : 'text-emerald-400'
+                }`}
+              />
+              <span
+                title={firebaseUser.email || firebaseUser.displayName || ''}
+                className="hidden max-w-[160px] truncate font-medium text-slate-200 sm:inline"
+              >
+                {firebaseUser.email || firebaseUser.displayName || 'Cloud'}
+              </span>
+              <button
+                type="button"
+                disabled={authBusy}
+                onClick={() => void handleLogout()}
+                title="Logout"
+                aria-label="Logout"
+                className="inline-flex items-center gap-1.5 rounded border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-[11px] font-semibold text-rose-300 transition-colors hover:bg-rose-500/20 disabled:opacity-50"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+                <span>Logout</span>
+              </button>
+            </div>
 
             <div
               role="group"
@@ -1003,7 +1053,7 @@ export function App() {
           <div className="flex flex-wrap items-center gap-3">
             <SetupFilterBar
               selectedSetup={selectedSetup}
-              onSelectSetup={setSelectedSetup}
+              onSelectSetup={handleSetupChange}
               availableCustomSetups={customSetups}
               label={t.common.filterBySetup}
             />
@@ -1011,7 +1061,7 @@ export function App() {
             <select
               aria-label="Filtro Asset"
               value={assetFilter}
-              onChange={(e) => setAssetFilter(e.target.value)}
+              onChange={(e) => handleAssetFilterChange(e.target.value)}
               className="rounded-lg border border-[#1E2634] bg-[#0B0E14] px-3 py-2 font-mono text-xs font-medium text-slate-200 transition-colors hover:border-sky-500/50"
             >
               <option value="ALL">{t.journal.assetFilterAll}</option>
