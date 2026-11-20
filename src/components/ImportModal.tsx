@@ -11,6 +11,7 @@ import {
 import {
   autoDetectColumnMapping,
   buildTradesFromSheet,
+  deduplicateImportedTrades,
   deriveAssetFromFilename,
   parseUploadedFile,
   STACKED_BLOCK_SETUPS,
@@ -19,6 +20,7 @@ import {
 interface ImportModalProps {
   isOpen: boolean;
   targetCategory: TradeCategory;
+  existingTrades: TradeRecord[];
   t: TranslationSet;
   onClose: () => void;
   onImport: (trades: TradeRecord[]) => void;
@@ -49,6 +51,7 @@ const MAPPING_OPTIONS: { value: MappingField; label: string }[] = [
 export function ImportModal({
   isOpen,
   targetCategory,
+  existingTrades,
   t,
   onClose,
   onImport,
@@ -106,41 +109,37 @@ export function ImportModal({
       ? sheets.reduce((sum, s) => sum + s.rows.length, 0)
       : activeSheet?.rows.length ?? 0;
 
-  const previewTrades = activeSheet
-    ? buildTradesFromSheet(
-        activeSheet,
-        mapping,
+  const sheetsToProcess =
+    selectedSheetIdx === -1 ? sheets : activeSheet ? [activeSheet] : [];
+
+  const allCandidateTrades: TradeRecord[] = [];
+  sheetsToProcess.forEach((sheet) => {
+    const sheetMapping =
+      sheet === activeSheet ? mapping : autoDetectColumnMapping(sheet.headers);
+    allCandidateTrades.push(
+      ...buildTradesFromSheet(
+        sheet,
+        sheetMapping,
         targetCategory,
         setupOverride,
         importAsset,
-      ).slice(0, 8)
-    : [];
+      ),
+    );
+  });
+
+  const { addedTrades: dedupedNewTrades, skippedDuplicates } =
+    deduplicateImportedTrades(existingTrades, allCandidateTrades);
+
+  const previewTrades = allCandidateTrades.slice(0, 8);
 
   const handleConfirmImport = () => {
     if (sheets.length === 0) return;
-    const sheetsToProcess =
-      selectedSheetIdx === -1 ? sheets : activeSheet ? [activeSheet] : [];
 
-    const imported: TradeRecord[] = [];
-    sheetsToProcess.forEach((sheet) => {
-      const sheetMapping =
-        sheet === activeSheet ? mapping : autoDetectColumnMapping(sheet.headers);
-      imported.push(
-        ...buildTradesFromSheet(
-          sheet,
-          sheetMapping,
-          targetCategory,
-          setupOverride,
-          importAsset,
-        ),
-      );
-    });
-
-    if (imported.length === 0) {
+    if (allCandidateTrades.length === 0) {
       setError('Nessuna riga con data valida trovata per l’importazione.');
       return;
     }
-    onImport(imported);
+    onImport(allCandidateTrades);
     setSheets([]);
     onClose();
   };
@@ -207,8 +206,13 @@ export function ImportModal({
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="rounded-md border border-[#1E2634] bg-[#0B0E14] p-3.5">
                   <div className="text-slate-400">{t.importer.detectedRows}</div>
-                  <div className="mt-1 font-mono text-xl font-bold text-emerald-400 tabular-nums">
-                    {totalDetectedRows}
+                  <div className="mt-1 flex items-baseline gap-2 font-mono tabular-nums">
+                    <span className="text-xl font-bold text-emerald-400">
+                      {dedupedNewTrades.length}
+                    </span>
+                    <span className="text-[11px] text-slate-400">
+                      / {totalDetectedRows} ({skippedDuplicates} dup.)
+                    </span>
                   </div>
                 </div>
 

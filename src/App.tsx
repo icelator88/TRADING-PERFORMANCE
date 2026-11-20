@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Download, FileJson, RotateCcw, Sparkles, Upload } from 'lucide-react';
 import { AkinatorCard } from './components/AkinatorCard';
 import { ConfirmModal } from './components/ConfirmModal';
@@ -30,6 +30,7 @@ import {
 } from './utils/calculations';
 import { analizzaTradeConGemini, buildGeminiReviewPrompt } from './utils/geminiReview';
 import {
+  deduplicateImportedTrades,
   exportBackupJson,
   exportTradesCsv,
   parseBackupJsonContent,
@@ -84,6 +85,7 @@ export function App() {
   });
 
   const [toast, setToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
 
   const t = TRANSLATIONS[lang];
 
@@ -92,9 +94,15 @@ export function App() {
     saveLanguagePreference(nextLang);
   };
 
-  const showToast = (msg: string, duration = 3600) => {
+  const showToast = (msg: string, duration = 4500) => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
     setToast(msg);
-    window.setTimeout(() => setToast(null), duration);
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, duration);
   };
 
   // Strict 5-strategy whitelist across all tabs and filters
@@ -249,8 +257,18 @@ export function App() {
   };
 
   const handleImportTrades = (imported: TradeRecord[]) => {
-    const missedIncoming = imported.filter((tr) => tr.category === 'missed');
-    const primaryIncoming = imported.filter((tr) => tr.category !== 'missed');
+    const existingPool =
+      importCategory === 'backtest'
+        ? backtestTrades
+        : [...liveTrades, ...missedTrades];
+
+    const { addedTrades, skippedDuplicates } = deduplicateImportedTrades(
+      existingPool,
+      imported,
+    );
+
+    const missedIncoming = addedTrades.filter((tr) => tr.category === 'missed');
+    const primaryIncoming = addedTrades.filter((tr) => tr.category !== 'missed');
 
     if (primaryIncoming.length > 0) {
       if (importCategory === 'backtest') {
@@ -283,7 +301,7 @@ export function App() {
 
     const perStrategy: Record<string, number> = {};
     let totalNetR = 0;
-    imported.forEach((tr) => {
+    addedTrades.forEach((tr) => {
       const key = tr.setup || tr.strategy || 'S1';
       perStrategy[key] = (perStrategy[key] ?? 0) + 1;
       totalNetR += Number.isFinite(tr.netR) ? tr.netR : 0;
@@ -292,22 +310,31 @@ export function App() {
       .map(([strategy, count]) => `${strategy} (${count})`)
       .join(', ');
 
-    const taggedBacktestMissed = imported.filter(
+    const taggedBacktestMissed = addedTrades.filter(
       (tr) => tr.category === 'backtest' && tr.isMissed,
     ).length;
     const totalTaggedMissed = missedIncoming.length + taggedBacktestMissed;
     const missedNote =
       totalTaggedMissed > 0
-        ? ` · ${totalTaggedMissed} taggati UNFILLED/NON PRESO`
+        ? ` · ${totalTaggedMissed} UNFILLED/NON PRESO`
         : '';
 
     const roundedR = roundTo(totalNetR, 2);
     const formattedTotalR = `${roundedR > 0 ? '+' : ''}${Number.isInteger(roundedR) ? roundedR : roundedR.toFixed(2)} R`;
 
-    showToast(
-      `Importazione completata: ${imported.length} Trade caricati | Totale: ${formattedTotalR} (${breakdown})${missedNote}`,
-      8000,
-    );
+    const baseSummary =
+      lang === 'en'
+        ? `Import completed: ${addedTrades.length} new trades added, ${skippedDuplicates} duplicates skipped`
+        : lang === 'es'
+          ? `Importación completada: ${addedTrades.length} nuevos trades añadidos, ${skippedDuplicates} duplicados omitidos`
+          : `Importazione completata: ${addedTrades.length} nuovi trade aggiunti, ${skippedDuplicates} duplicati saltati`;
+
+    const details =
+      addedTrades.length > 0
+        ? ` | Totale: ${formattedTotalR} (${breakdown})${missedNote}`
+        : '';
+
+    showToast(`${baseSummary}${details}`, 9000);
   };
 
   const loadDemoTrades = (target: TradeCategory) => {
@@ -1561,6 +1588,11 @@ export function App() {
       <ImportModal
         isOpen={importModalOpen}
         targetCategory={importCategory}
+        existingTrades={
+          importCategory === 'backtest'
+            ? backtestTrades
+            : [...liveTrades, ...missedTrades]
+        }
         t={t}
         onClose={() => setImportModalOpen(false)}
         onImport={handleImportTrades}

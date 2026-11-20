@@ -16,7 +16,9 @@ import {
   runRowCalculationEngine,
 } from './calculations';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+if (typeof pdfWorkerUrl === 'string') {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+}
 
 declare global {
   interface Window {
@@ -255,14 +257,132 @@ export function normalizeImportDate(raw: unknown): string {
   return s;
 }
 
-function formatExcelTimeCell(raw: unknown): string {
+function extractEmbeddedTime(raw: unknown): string {
+  if (raw instanceof Date && !Number.isNaN(raw.getTime())) {
+    const hh = String(raw.getHours()).padStart(2, '0');
+    const mm = String(raw.getMinutes()).padStart(2, '0');
+    return hh === '00' && mm === '00' ? '' : `${hh}:${mm}`;
+  }
+
+  const numericVal =
+    typeof raw === 'number'
+      ? raw
+      : typeof raw === 'string' && /^\d{5}\.\d+$/.test(raw.trim())
+        ? Number(raw.trim())
+        : NaN;
+
+  if (Number.isFinite(numericVal) && numericVal > 20000 && numericVal < 90000) {
+    const frac = numericVal - Math.floor(numericVal);
+    if (frac > 0.0001) {
+      const totalMinutes = Math.round(frac * 24 * 60);
+      const hh = String(Math.floor(totalMinutes / 60) % 24).padStart(2, '0');
+      const mm = String(totalMinutes % 60).padStart(2, '0');
+      return `${hh}:${mm}`;
+    }
+  }
+
+  const s = String(raw ?? '').trim();
+  const timeInStr = /(?:T|\s)(\d{1,2})[:.](\d{2})(?:[:.]\d{2})?\s*(AM|PM)?/i.exec(s);
+  if (timeInStr) {
+    let hh = Number(timeInStr[1]);
+    const mm = Number(timeInStr[2]);
+    const ampm = timeInStr[3]?.toUpperCase();
+    if (ampm === 'PM' && hh < 12) hh += 12;
+    if (ampm === 'AM' && hh === 12) hh = 0;
+    if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59) {
+      return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    }
+  }
+
+  return '';
+}
+
+export function normalizeImportTime(raw: unknown): string {
   if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 && raw < 1) {
     const totalMinutes = Math.round(raw * 24 * 60);
     const hh = String(Math.floor(totalMinutes / 60) % 24).padStart(2, '0');
     const mm = String(totalMinutes % 60).padStart(2, '0');
     return `${hh}:${mm}`;
   }
-  return String(raw ?? '').trim();
+
+  if (raw instanceof Date && !Number.isNaN(raw.getTime())) {
+    const hh = String(raw.getHours()).padStart(2, '0');
+    const mm = String(raw.getMinutes()).padStart(2, '0');
+    return `${hh}:${mm}`;
+  }
+
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+
+  const m = /^(\d{1,2})[:.](\d{2})(?:[:.]\d{2})?\s*(AM|PM)?$/i.exec(s);
+  if (m) {
+    let hh = Number(m[1]);
+    const mm = Number(m[2]);
+    const ampm = m[3]?.toUpperCase();
+    if (ampm === 'PM' && hh < 12) hh += 12;
+    if (ampm === 'AM' && hh === 12) hh = 0;
+    if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59) {
+      return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    }
+  }
+
+  return extractEmbeddedTime(s) || s;
+}
+
+function formatExcelTimeCell(raw: unknown): string {
+  return normalizeImportTime(raw);
+}
+
+export function normalizeOpenTimestamp(date: unknown, entryTime?: unknown): string {
+  const normDate = normalizeImportDate(date);
+  const embedded = extractEmbeddedTime(date);
+  const normTime = normalizeImportTime(entryTime) || embedded || '00:00';
+  const hhmm = /^\d{2}:\d{2}$/.test(normTime) ? normTime : '00:00';
+  return `${normDate}T${hhmm}`;
+}
+
+export function buildTradeDuplicateKey(
+  trade: Pick<TradeRecord, 'date' | 'entryTime' | 'asset' | 'bias' | 'entryPrice' | 'netR'>,
+): string {
+  const openTimestamp = normalizeOpenTimestamp(trade.date, trade.entryTime);
+  const symbol = String(trade.asset ?? '').trim().toUpperCase();
+  const direction =
+    String(trade.bias ?? '').trim().toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+  const entryNum =
+    typeof trade.entryPrice === 'number' && Number.isFinite(trade.entryPrice) && trade.entryPrice > 0
+      ? Number(trade.entryPrice.toFixed(6))
+      : null;
+  const entryKey = entryNum !== null ? String(entryNum) : 'NONE';
+  const rawNetR = Number.isFinite(trade.netR) ? roundTo(trade.netR, 2) : 0;
+  const safeNetR = Object.is(rawNetR, -0) || rawNetR === 0 ? 0 : rawNetR;
+  const netRKey = safeNetR.toFixed(2);
+
+  return `${openTimestamp}|${symbol}|${direction}|${entryKey}|${netRKey}`;
+}
+
+export function deduplicateImportedTrades(
+  existingTrades: TradeRecord[],
+  incomingTrades: TradeRecord[],
+): { addedTrades: TradeRecord[]; skippedDuplicates: number } {
+  const seenKeys = new Set<string>();
+  existingTrades.forEach((tr) => {
+    seenKeys.add(buildTradeDuplicateKey(tr));
+  });
+
+  const addedTrades: TradeRecord[] = [];
+  let skippedDuplicates = 0;
+
+  incomingTrades.forEach((tr) => {
+    const key = buildTradeDuplicateKey(tr);
+    if (seenKeys.has(key)) {
+      skippedDuplicates += 1;
+      return;
+    }
+    seenKeys.add(key);
+    addedTrades.push(tr);
+  });
+
+  return { addedTrades, skippedDuplicates };
 }
 
 function parseCsvLine(line: string, delimiter: string): string[] {
@@ -366,11 +486,14 @@ function rowsMatrixToParsedSheet(
         ? knownSheetStrategy
         : stackedStrategy;
 
+    const embeddedTime = extractEmbeddedTime(c0Raw);
+    const parsedTime = formatExcelTimeCell(row[3]) || embeddedTime;
+
     const rowObj: Record<string, string> = {
       DATA: dateIso,
       GIORNO: String(row[1] ?? '').trim(),
       SESSIONE: String(row[2] ?? '').trim(),
-      ORARIO: formatExcelTimeCell(row[3]),
+      ORARIO: parsedTime,
       BIAS: String(row[4] ?? '').trim().toUpperCase(),
       OVERNIGHT: String(row[5] ?? '').trim(),
       NOTE: String(row[6] ?? '').trim(),
@@ -599,15 +722,23 @@ export function buildTradesFromSheet(
     }
 
     const netR = netRParsed !== null ? roundTo(netRParsed, 2) : 0;
-    const riskPct = 1;
+    const riskParsed = parseNumericRCell(fieldValues.riskPct);
+    const riskPct = riskParsed !== null && riskParsed >= 0 ? riskParsed : 1;
+    const entryParsed = parseNumericRCell(fieldValues.entryPrice);
+    const slParsed = parseNumericRCell(fieldValues.slPrice);
+    const tpParsed = parseNumericRCell(fieldValues.tpPrice);
+    const normEntryTime = normalizeImportTime(fieldValues.entryTime ?? rawRow.ORARIO ?? '');
 
-    const missedReason = isMissedByRule
-      ? outcome === 'UNFILLED'
-        ? 'Ordine Non Fillato'
-        : MISSED_REASONS[0]
-      : targetCategory === 'missed'
-        ? MISSED_REASONS[0]
-        : undefined;
+    const mappedReason = String(fieldValues.missedReason ?? '').trim();
+    const missedReason = mappedReason
+      ? mappedReason
+      : isMissedByRule
+        ? outcome === 'UNFILLED'
+          ? 'Ordine Non Fillato'
+          : MISSED_REASONS[0]
+        : targetCategory === 'missed'
+          ? MISSED_REASONS[0]
+          : undefined;
 
     const base: TradeRecord = {
       id: generateTradeId(finalCategory.slice(0, 2)),
@@ -615,16 +746,16 @@ export function buildTradesFromSheet(
       date: parsedDate,
       day: String(fieldValues.day ?? rawRow.GIORNO ?? '').trim() || undefined,
       session: String(fieldValues.session ?? rawRow.SESSIONE ?? '').trim() || undefined,
-      entryTime: String(fieldValues.entryTime ?? rawRow.ORARIO ?? '').trim() || undefined,
+      entryTime: normEntryTime || undefined,
       asset,
       setup,
       strategy: setup,
       isMissed: isMissedByRule || finalCategory === 'missed',
       bias,
       riskPct,
-      entryPrice: null,
-      slPrice: null,
-      tpPrice: null,
+      entryPrice: entryParsed,
+      slPrice: slParsed,
+      tpPrice: tpParsed,
       outcome,
       netR,
       rrMax: rrMaxParsed,
