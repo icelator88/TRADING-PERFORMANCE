@@ -123,9 +123,7 @@ export function TradeModal({
     if (!date || !asset.trim()) return;
 
     const trimmedNotes = notes.trim();
-    const isMissedLive =
-      category === 'live' && trimmedNotes.toUpperCase().includes('NON PRESO');
-    const effectiveCategory: TradeCategory = isMissedLive ? 'missed' : category;
+    const effectiveCategory: TradeCategory = category;
 
     const finalRecord = runRowCalculationEngine({
       ...previewRecord,

@@ -126,7 +126,16 @@ export function runRowCalculationEngine(trade: TradeRecord): TradeRecord {
 export function normalizeOutcome(raw: string | undefined | null): OutcomeType {
   const s = String(raw ?? '').trim().toUpperCase();
   if (!s) return 'BE';
-  if (s.includes('UNFILLED') || s.includes('NON FILLATO') || s === 'MISSED' || s === 'CANCELLED') {
+  if (
+    s === 'UF' ||
+    s === 'U.F.' ||
+    s.includes('UNFILLED') ||
+    s.includes('UNFIL') ||
+    s.includes('NON FILLAT') ||
+    s.includes('NO FILL') ||
+    s === 'MISSED' ||
+    s === 'CANCELLED'
+  ) {
     return 'UNFILLED';
   }
   if (s === 'TP' || s.startsWith('TP') || s === 'WIN' || s === 'W' || s === 'PROFIT' || s === 'TAKE PROFIT' || s === 'TARGET') {

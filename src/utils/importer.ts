@@ -1052,14 +1052,7 @@ export function buildTradesFromSheet(
     const bias = biasRaw === 'SHORT' || biasRaw === 'SELL' ? 'SHORT' : 'LONG';
 
     const notesText = String(fieldValues.notes ?? rawRow.NOTE ?? '').trim();
-    const isMissedByRule = notesText.toUpperCase().includes('NON PRESO');
-
-    const finalCategory: TradeCategory =
-      targetCategory === 'backtest'
-        ? 'backtest'
-        : isMissedByRule
-          ? 'missed'
-          : targetCategory;
+    const finalCategory: TradeCategory = targetCategory;
 
     let setup = 'S1';
     if (setupOverride && setupOverride !== 'AUTO') {
@@ -1081,15 +1074,11 @@ export function buildTradesFromSheet(
     const normEntryTime = normalizeImportTime(fieldValues.entryTime ?? rawRow.ORARIO ?? '');
 
     const mappedReason = String(fieldValues.missedReason ?? '').trim();
-    const missedReason = mappedReason
-      ? mappedReason
-      : isMissedByRule
-        ? outcome === 'UNFILLED'
-          ? 'Ordine Non Fillato'
-          : MISSED_REASONS[0]
-        : targetCategory === 'missed'
-          ? MISSED_REASONS[0]
-          : undefined;
+    const missedReason =
+      finalCategory === 'missed'
+        ? mappedReason ||
+          (outcome === 'UNFILLED' ? 'Ordine Non Fillato' : MISSED_REASONS[0])
+        : undefined;
 
     const base: TradeRecord = {
       id: generateTradeId(finalCategory.slice(0, 2)),
@@ -1101,7 +1090,7 @@ export function buildTradesFromSheet(
       asset,
       setup,
       strategy: setup,
-      isMissed: isMissedByRule || finalCategory === 'missed',
+      isMissed: finalCategory === 'missed',
       bias,
       riskPct,
       entryPrice: entryParsed,

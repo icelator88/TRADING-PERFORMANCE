@@ -71,16 +71,6 @@ function coerceLegacyTrade(
   const bias = biasRaw === 'SHORT' ? 'SHORT' : 'LONG';
 
   const outcome = normalizeOutcome(String(raw.outcome ?? raw.esito ?? 'BE'));
-  const notesStr =
-    typeof raw.notes === 'string'
-      ? raw.notes
-      : typeof raw.note === 'string'
-        ? raw.note
-        : '';
-
-  if (category === 'live' && notesStr.toUpperCase().includes('NON PRESO')) {
-    category = 'missed';
-  }
 
   // Support both our current schema (netR) and mechanical journal schema (rr + esito)
   let netR = Number(raw.netR ?? raw.r ?? raw.rMultiple);

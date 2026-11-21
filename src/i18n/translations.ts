@@ -196,7 +196,7 @@ export const TRANSLATIONS: Record<Language, TranslationSet> = {
     },
     dashboard: {
       heading: 'Dashboard & Comparison',
-      subheading: 'Isolated Backtest benchmark vs Live Journaling execution and plan adherence.',
+      subheading: 'Isolated Backtest benchmark vs executed Live Journaling comparison.',
       backtestNetR: 'Backtest Net R',
       liveNetR: 'Live Journaling Net R',
       executionGap: 'Execution Delta (Live - Backtest)',
@@ -363,7 +363,7 @@ export const TRANSLATIONS: Record<Language, TranslationSet> = {
     },
     dashboard: {
       heading: 'Dashboard & Confronto',
-      subheading: 'Confronto isolato tra Backtest meccanico, Journal Reale eseguito e aderenza al piano.',
+      subheading: 'Confronto isolato tra Backtest meccanico e Journal Reale eseguito.',
       backtestNetR: 'R Netto Backtest',
       liveNetR: 'R Netto Journal Reale',
       executionGap: 'Scostamento Esecuzione (Reale - Backtest)',
@@ -530,7 +530,7 @@ export const TRANSLATIONS: Record<Language, TranslationSet> = {
     },
     dashboard: {
       heading: 'Panel y Comparativa',
-      subheading: 'Comparación aislada entre Backtest mecánico, Live Journaling real y adherencia al plan.',
+      subheading: 'Comparación aislada entre Backtest mecánico y Live Journaling real ejecutado.',
       backtestNetR: 'R Neto Backtest',
       liveNetR: 'R Neto Live Journaling',
       executionGap: 'Diferencia de Ejecución (Live - Backtest)',

@@ -466,16 +466,11 @@ export function App() {
   );
   const filteredLive = useMemo(
     () =>
-      filterBySetupAndAsset(liveTrades).filter(
-        (tr) =>
-          tr.category === 'live' &&
-          !(tr.notes ?? '').toUpperCase().includes('NON PRESO') &&
-          (!tr.isMissed || tr.outcome === 'UNFILLED'),
-      ),
+      filterBySetupAndAsset(liveTrades).filter((tr) => tr.category === 'live'),
     [liveTrades, selectedSetup, assetFilter],
   );
   const executedLiveForAdherence = useMemo(
-    () => filteredLive.filter((tr) => tr.outcome !== 'UNFILLED' && !tr.isMissed),
+    () => filteredLive.filter((tr) => tr.outcome !== 'UNFILLED'),
     [filteredLive],
   );
   const filteredMissed = useMemo(
@@ -518,12 +513,7 @@ export function App() {
       );
     }
     const validAllLiveDates = liveTrades
-      .filter(
-        (tr) =>
-          tr.category === 'live' &&
-          !(tr.notes ?? '').toUpperCase().includes('NON PRESO') &&
-          (!tr.isMissed || tr.outcome === 'UNFILLED'),
-      )
+      .filter((tr) => tr.category === 'live')
       .map((tr) => tr.date)
       .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
     if (validAllLiveDates.length > 0) {
@@ -546,22 +536,9 @@ export function App() {
     [filteredBacktest, isLiveAligned, liveStartDate],
   );
 
-  const dashboardMissedTrades = useMemo(
-    () =>
-      isLiveAligned && liveStartDate
-        ? filteredMissed.filter((tr) => tr.date >= liveStartDate)
-        : filteredMissed,
-    [filteredMissed, isLiveAligned, liveStartDate],
-  );
-
   const dashboardBacktestStats = useMemo(
     () => calculatePerformanceStats(dashboardBacktestTrades),
     [dashboardBacktestTrades],
-  );
-
-  const dashboardMissedStats = useMemo(
-    () => calculateMissedStats(executedLiveForAdherence, dashboardMissedTrades),
-    [executedLiveForAdherence, dashboardMissedTrades],
   );
 
   const applySearchAndSubFilters = (
@@ -673,17 +650,12 @@ export function App() {
         ? [...backtestTrades]
         : importCategory === 'missed'
           ? [...missedTrades]
-          : [...liveTrades, ...missedTrades];
+          : [...liveTrades];
 
     if (firebaseUser) {
       try {
         const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
-        const dbPool =
-          importCategory === 'backtest'
-            ? dbTrades.filter((tr) => tr.category === 'backtest')
-            : importCategory === 'missed'
-              ? dbTrades.filter((tr) => tr.category === 'missed')
-              : dbTrades.filter((tr) => tr.category !== 'backtest');
+        const dbPool = dbTrades.filter((tr) => tr.category === importCategory);
         const byId = new Map<string, TradeRecord>();
         dbPool.forEach((tr) => byId.set(tr.id, tr));
         existingPool.forEach((tr) => byId.set(tr.id, tr));
@@ -700,7 +672,6 @@ export function App() {
     );
 
     const tradesToSyncCloud: TradeRecord[] = [];
-    let missedIncomingCount = 0;
 
     if (addedTrades.length > 0) {
       if (importCategory === 'missed') {
@@ -713,29 +684,28 @@ export function App() {
         setMissedTrades(next);
         saveTradesSafely('missed', next);
         tradesToSyncCloud.push(...normalizedMissed);
-        missedIncomingCount = normalizedMissed.length;
       } else if (importCategory === 'backtest') {
-        const next = [...backtestTrades, ...addedTrades];
+        const normalizedBt = addedTrades.map((t) => ({
+          ...t,
+          category: 'backtest' as const,
+          isMissed: false,
+          missedReason: undefined,
+        }));
+        const next = [...backtestTrades, ...normalizedBt];
         setBacktestTrades(next);
         saveTradesSafely('backtest', next);
-        tradesToSyncCloud.push(...addedTrades);
+        tradesToSyncCloud.push(...normalizedBt);
       } else {
-        const missedIncoming = addedTrades.filter((tr) => tr.category === 'missed');
-        const primaryIncoming = addedTrades.filter((tr) => tr.category !== 'missed');
-
-        if (primaryIncoming.length > 0) {
-          const next = [...liveTrades, ...primaryIncoming];
-          setLiveTrades(next);
-          saveTradesSafely('live', next);
-          tradesToSyncCloud.push(...primaryIncoming);
-        }
-        if (missedIncoming.length > 0) {
-          const nextMissed = [...missedTrades, ...missedIncoming];
-          setMissedTrades(nextMissed);
-          saveTradesSafely('missed', nextMissed);
-          tradesToSyncCloud.push(...missedIncoming);
-          missedIncomingCount = missedIncoming.length;
-        }
+        const normalizedLive = addedTrades.map((t) => ({
+          ...t,
+          category: 'live' as const,
+          isMissed: false,
+          missedReason: undefined,
+        }));
+        const next = [...liveTrades, ...normalizedLive];
+        setLiveTrades(next);
+        saveTradesSafely('live', next);
+        tradesToSyncCloud.push(...normalizedLive);
       }
     }
 
@@ -760,16 +730,6 @@ export function App() {
       .map(([strategy, count]) => `${strategy} (${count})`)
       .join(', ');
 
-    const taggedBacktestMissed = addedTrades.filter(
-      (tr) => tr.category === 'backtest' && tr.isMissed,
-    ).length;
-    const totalTaggedMissed =
-      importCategory === 'missed' ? 0 : missedIncomingCount + taggedBacktestMissed;
-    const missedNote =
-      totalTaggedMissed > 0
-        ? ` · ${totalTaggedMissed} UNFILLED/NON PRESO`
-        : '';
-
     const roundedR = roundTo(totalNetR, 2);
     const formattedTotalR = `${roundedR > 0 ? '+' : ''}${Number.isInteger(roundedR) ? roundedR : roundedR.toFixed(2)} R`;
 
@@ -782,7 +742,7 @@ export function App() {
 
     const details =
       addedTrades.length > 0
-        ? ` | Totale: ${formattedTotalR} (${breakdown})${missedNote}`
+        ? ` | Totale: ${formattedTotalR} (${breakdown})`
         : '';
 
     showToast(`${baseSummary}${details}`, 9000);
@@ -831,8 +791,14 @@ export function App() {
 
     addedTrades.forEach((tr) => {
       if (source.category === 'backtest') {
-        targetPool.push(tr);
-        addedBt.push(tr);
+        const normalizedBt: TradeRecord = {
+          ...tr,
+          category: 'backtest',
+          isMissed: false,
+          missedReason: undefined,
+        };
+        targetPool.push(normalizedBt);
+        addedBt.push(normalizedBt);
       } else if (source.category === 'missed') {
         const normalizedMissed: TradeRecord = {
           ...tr,
@@ -841,13 +807,15 @@ export function App() {
         };
         targetPool.push(normalizedMissed);
         addedMissed.push(normalizedMissed);
-      } else if (tr.category === 'missed') {
-        targetPool.push(tr);
-        missedPool.push(tr);
-        addedMissed.push(tr);
       } else {
-        targetPool.push(tr);
-        addedLive.push(tr);
+        const normalizedLive: TradeRecord = {
+          ...tr,
+          category: 'live',
+          isMissed: false,
+          missedReason: undefined,
+        };
+        targetPool.push(normalizedLive);
+        addedLive.push(normalizedLive);
       }
     });
 
@@ -899,7 +867,7 @@ export function App() {
     source: GoogleSheetSource,
   ): Promise<AssetSyncOutcome> => {
     const btPool = [...backtestTrades];
-    const livePool = [...liveTrades, ...missedTrades];
+    const livePool = [...liveTrades];
     const missedPool = [...missedTrades];
 
     if (firebaseUser) {
@@ -911,9 +879,10 @@ export function App() {
         dbTrades.forEach((tr) => {
           if (tr.category === 'backtest') {
             byIdBt.set(tr.id, tr);
+          } else if (tr.category === 'missed') {
+            byIdMissed.set(tr.id, tr);
           } else {
             byIdLv.set(tr.id, tr);
-            if (tr.category === 'missed') byIdMissed.set(tr.id, tr);
           }
         });
         btPool.forEach((tr) => byIdBt.set(tr.id, tr));
@@ -992,7 +961,7 @@ export function App() {
     onProgress?: (currentIndex: number, total: number, asset: string) => void,
   ): Promise<AssetSyncOutcome[]> => {
     const btPool = [...backtestTrades];
-    const livePool = [...liveTrades, ...missedTrades];
+    const livePool = [...liveTrades];
     const missedPool = [...missedTrades];
 
     if (firebaseUser) {
@@ -1004,9 +973,10 @@ export function App() {
         dbTrades.forEach((tr) => {
           if (tr.category === 'backtest') {
             byIdBt.set(tr.id, tr);
+          } else if (tr.category === 'missed') {
+            byIdMissed.set(tr.id, tr);
           } else {
             byIdLv.set(tr.id, tr);
-            if (tr.category === 'missed') byIdMissed.set(tr.id, tr);
           }
         });
         btPool.forEach((tr) => byIdBt.set(tr.id, tr));
@@ -1789,7 +1759,7 @@ export function App() {
                       ? filteredLive
                       : activeTab === 'missed'
                         ? filteredMissed
-                        : [...filteredBacktest, ...filteredLive, ...filteredMissed];
+                        : [...filteredBacktest, ...filteredLive];
                 if (exportSet.length === 0) {
                   showToast('Nessun trade da esportare in CSV.');
                   return;
@@ -1855,7 +1825,8 @@ export function App() {
                     };
 
                     let existingBtPool = [...backtestTrades];
-                    let existingLiveMissedPool = [...liveTrades, ...missedTrades];
+                    let existingLivePool = [...liveTrades];
+                    let existingMissedPool = [...missedTrades];
 
                     if (firebaseUser) {
                       try {
@@ -1866,9 +1837,13 @@ export function App() {
                           dbTrades.filter((tr) => tr.category === 'backtest'),
                           existingBtPool,
                         );
-                        existingLiveMissedPool = mergeUniqueById(
-                          dbTrades.filter((tr) => tr.category !== 'backtest'),
-                          existingLiveMissedPool,
+                        existingLivePool = mergeUniqueById(
+                          dbTrades.filter((tr) => tr.category === 'live'),
+                          existingLivePool,
+                        );
+                        existingMissedPool = mergeUniqueById(
+                          dbTrades.filter((tr) => tr.category === 'missed'),
+                          existingMissedPool,
                         );
                       } catch (err) {
                         setFatalError(
@@ -1883,11 +1858,11 @@ export function App() {
                       restored.backtest,
                     );
                     const liveDedup = deduplicateImportedTrades(
-                      existingLiveMissedPool,
+                      existingLivePool,
                       restored.live,
                     );
                     const missedDedup = deduplicateImportedTrades(
-                      [...existingLiveMissedPool, ...liveDedup.addedTrades],
+                      existingMissedPool,
                       restored.missed,
                     );
 
@@ -2040,7 +2015,7 @@ export function App() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                 <div className="rounded-lg border border-[#1E2634] bg-[#121721] p-5">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-medium text-slate-400">
@@ -2101,30 +2076,8 @@ export function App() {
                     {formatR(dashboardExecutionDeltaR)}
                   </div>
                   <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
-                    {t.dashboard.missedCol}: {formatR(dashboardMissedStats.theoreticalNetR)}
-                  </div>
-                </div>
-
-                <div className="rounded-lg border border-[#1E2634] bg-[#121721] p-5">
-                  <div className="text-xs font-medium text-slate-400">
-                    {t.dashboard.adherenceScore}
-                  </div>
-                  <div
-                    className={`mt-2 font-mono text-2xl font-bold tabular-nums ${
-                      dashboardMissedStats.totalSignals === 0
-                        ? 'text-slate-300'
-                        : dashboardMissedStats.adherenceScorePct >= 80
-                          ? 'text-emerald-400'
-                          : dashboardMissedStats.adherenceScorePct >= 60
-                            ? 'text-amber-400'
-                            : 'text-rose-400'
-                    }`}
-                  >
-                    {dashboardMissedStats.adherenceScorePct.toFixed(1)}%
-                  </div>
-                  <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
-                    {dashboardMissedStats.executedCount} {t.common.executedSuffix} ·{' '}
-                    {dashboardMissedStats.totalMissed} {t.common.missedSuffix}
+                    {t.dashboard.liveSeries}: {formatR(liveStats.netR)} · {t.dashboard.backtestSeries}:{' '}
+                    {formatR(dashboardBacktestStats.netR)}
                   </div>
                 </div>
               </div>
@@ -2176,7 +2129,6 @@ export function App() {
                       <th className="px-5 py-3">{t.dashboard.metricCol}</th>
                       <th className="px-5 py-3 text-right">{t.nav.backtest}</th>
                       <th className="px-5 py-3 text-right">{t.nav.live}</th>
-                      <th className="px-5 py-3 text-right">{t.dashboard.missedCol}</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#1E2634] font-mono tabular-nums">
@@ -2198,15 +2150,6 @@ export function App() {
                           {liveStats.breakevens} BE · {liveStats.unfilled} UF
                         </div>
                       </td>
-                      <td className="px-5 py-3 text-right text-amber-300">
-                        <div>{dashboardMissedStats.totalMissed}</div>
-                        <div className="mt-0.5 text-[10px] text-slate-400">
-                          {dashboardMissedStats.theoreticalWins} TP ·{' '}
-                          {dashboardMissedStats.avoidedLosses} SL ·{' '}
-                          {dashboardMissedStats.theoreticalBE} BE ·{' '}
-                          {dashboardMissedStats.theoreticalUnfilled} UF
-                        </div>
-                      </td>
                     </tr>
                     <tr>
                       <td className="px-5 py-3 font-sans text-slate-300">
@@ -2217,9 +2160,6 @@ export function App() {
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
                         {liveStats.winRatePct.toFixed(1)}%
-                      </td>
-                      <td className="px-5 py-3 text-right text-slate-400">
-                        {dashboardMissedStats.theoreticalWinRatePct.toFixed(1)}%
                       </td>
                     </tr>
                     <tr>
@@ -2232,9 +2172,6 @@ export function App() {
                       <td className="px-5 py-3 text-right font-semibold text-sky-400">
                         {formatR(liveStats.netR)}
                       </td>
-                      <td className="px-5 py-3 text-right font-semibold text-amber-400">
-                        {formatR(dashboardMissedStats.theoreticalNetR)}
-                      </td>
                     </tr>
                     <tr>
                       <td className="px-5 py-3 font-sans text-slate-300">
@@ -2246,7 +2183,6 @@ export function App() {
                       <td className="px-5 py-3 text-right text-slate-100">
                         {formatR(liveStats.expectancyR)}
                       </td>
-                      <td className="px-5 py-3 text-right text-slate-400">—</td>
                     </tr>
                     <tr>
                       <td className="px-5 py-3 font-sans text-slate-300">
@@ -2258,7 +2194,6 @@ export function App() {
                       <td className="px-5 py-3 text-right text-rose-400">
                         -{liveStats.maxDrawdownR.toFixed(2)} R
                       </td>
-                      <td className="px-5 py-3 text-right text-slate-400">—</td>
                     </tr>
                     <tr>
                       <td className="px-5 py-3 font-sans text-slate-300">
@@ -2272,7 +2207,6 @@ export function App() {
                       <td className="px-5 py-3 text-right text-slate-100">
                         {liveStats.profitFactorInfinite ? 'Max' : liveStats.profitFactor.toFixed(2)}
                       </td>
-                      <td className="px-5 py-3 text-right text-slate-400">—</td>
                     </tr>
                     <tr>
                       <td className="px-5 py-3 font-sans text-slate-300">
@@ -2286,7 +2220,6 @@ export function App() {
                       <td className="px-5 py-3 text-right text-slate-100">
                         {liveStats.payoffRatio === null ? 'Max' : `${liveStats.payoffRatio.toFixed(2)} : 1`}
                       </td>
-                      <td className="px-5 py-3 text-right text-slate-400">—</td>
                     </tr>
                     <tr>
                       <td className="px-5 py-3 font-sans text-slate-300">
@@ -2311,7 +2244,6 @@ export function App() {
                             ? liveStats.sortinoRatio.toFixed(2)
                             : '0.00'}
                       </td>
-                      <td className="px-5 py-3 text-right text-slate-400">—</td>
                     </tr>
                     <tr>
                       <td className="px-5 py-3 font-sans text-slate-300">
@@ -2330,7 +2262,6 @@ export function App() {
                         {liveStats.calmarRatio !== null ? liveStats.calmarRatio.toFixed(2) : 'N/A'} /{' '}
                         {liveStats.recoveryFactor !== null ? liveStats.recoveryFactor.toFixed(2) : 'Max'}
                       </td>
-                      <td className="px-5 py-3 text-right text-slate-400">—</td>
                     </tr>
                     <tr>
                       <td className="px-5 py-3 font-sans text-slate-300">
@@ -2342,7 +2273,6 @@ export function App() {
                       <td className="px-5 py-3 text-right text-sky-400">
                         {liveStats.riskOfRuinPct.toFixed(2)}%
                       </td>
-                      <td className="px-5 py-3 text-right text-slate-400">—</td>
                     </tr>
                   </tbody>
                 </table>
@@ -2811,48 +2741,6 @@ export function App() {
               }}
               onDelete={(tr) => setDeleteTarget(tr)}
             />
-
-            {filteredBacktest.some(
-              (tr) =>
-                tr.isMissed ||
-                tr.outcome === 'UNFILLED' ||
-                (tr.notes ?? '').toUpperCase().includes('NON PRESO'),
-            ) ? (
-              <div className="space-y-3 pt-2">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <h3 className="text-sm font-semibold text-slate-200">
-                    Segnali UNFILLED / NON PRESO rilevati nel Backtest
-                  </h3>
-                  <span className="text-xs text-slate-400">
-                    Visibili qui per controllo senza alterare le statistiche del conto reale
-                  </span>
-                </div>
-                <TradeTable
-                  trades={applySearchAndSubFilters(
-                    filteredBacktest.filter(
-                      (tr) =>
-                        tr.isMissed ||
-                        tr.outcome === 'UNFILLED' ||
-                        (tr.notes ?? '').toUpperCase().includes('NON PRESO'),
-                    ),
-                    'missed',
-                  )}
-                  category="missed"
-                  t={t}
-                  emptyMessage={t.journal.emptyMissed}
-                  onAddFirst={() => {
-                    setEditingTrade(null);
-                    setTradeModalCategory('missed');
-                    setTradeModalOpen(true);
-                  }}
-                  onEdit={(tr) => {
-                    setEditingTrade(tr);
-                    setTradeModalOpen(true);
-                  }}
-                  onDelete={(tr) => setDeleteTarget(tr)}
-                />
-              </div>
-            ) : null}
           </div>
         ) : null}
       </main>
@@ -2888,7 +2776,7 @@ export function App() {
             ? backtestTrades
             : importCategory === 'missed'
               ? missedTrades
-              : [...liveTrades, ...missedTrades]
+              : liveTrades
         }
         t={t}
         onClose={() => setImportModalOpen(false)}
