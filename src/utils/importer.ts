@@ -365,8 +365,10 @@ export function deduplicateImportedTrades(
   incomingTrades: TradeRecord[],
 ): { addedTrades: TradeRecord[]; skippedDuplicates: number } {
   const seenKeys = new Set<string>();
+  const seenIds = new Set<string>();
   existingTrades.forEach((tr) => {
     seenKeys.add(buildTradeDuplicateKey(tr));
+    if (tr.id) seenIds.add(tr.id);
   });
 
   const addedTrades: TradeRecord[] = [];
@@ -374,11 +376,12 @@ export function deduplicateImportedTrades(
 
   incomingTrades.forEach((tr) => {
     const key = buildTradeDuplicateKey(tr);
-    if (seenKeys.has(key)) {
+    if (seenKeys.has(key) || (tr.id && seenIds.has(tr.id))) {
       skippedDuplicates += 1;
       return;
     }
     seenKeys.add(key);
+    if (tr.id) seenIds.add(tr.id);
     addedTrades.push(tr);
   });
 
@@ -899,10 +902,15 @@ function normalizeRestoredTrade(
   const biasRaw = String(raw.bias ?? raw.direction ?? 'LONG').toUpperCase();
   const bias = biasRaw === 'SHORT' ? 'SHORT' : 'LONG';
   const outcome = normalizeOutcome(String(raw.outcome ?? 'BE'));
-  const netRNum = Number(raw.netR ?? raw.rMultiple ?? 0);
-  const riskNum = Number(raw.riskPct ?? 1);
-  const netR = Number.isFinite(netRNum) ? roundTo(netRNum, 2) : 0;
-  const riskPct = Number.isFinite(riskNum) && riskNum >= 0 ? riskNum : 1;
+  const toFiniteOrNull = (val: unknown): number | null => {
+    if (val === null || val === undefined || val === '') return null;
+    const n = typeof val === 'number' ? val : Number(String(val).replace(',', '.').trim());
+    return Number.isFinite(n) ? n : null;
+  };
+  const netRNum = toFiniteOrNull(raw.netR ?? raw.rMultiple ?? raw.pnl ?? raw.result) ?? 0;
+  const riskNum = toFiniteOrNull(raw.riskPct) ?? 1;
+  const netR = roundTo(netRNum, 2);
+  const riskPct = riskNum >= 0 ? riskNum : 1;
 
   return runRowCalculationEngine({
     id: typeof raw.id === 'string' && raw.id ? raw.id : generateTradeId(category.slice(0, 2)),
@@ -910,23 +918,23 @@ function normalizeRestoredTrade(
     date,
     day: typeof raw.day === 'string' ? raw.day : undefined,
     session: typeof raw.session === 'string' ? raw.session : undefined,
-    entryTime: typeof raw.entryTime === 'string' ? raw.entryTime : undefined,
-    exitTime: typeof raw.exitTime === 'string' ? raw.exitTime : undefined,
+    entryTime: raw.entryTime ? normalizeImportTime(raw.entryTime) : undefined,
+    exitTime: raw.exitTime ? normalizeImportTime(raw.exitTime) : undefined,
     asset,
     setup,
     strategy: setup,
     isMissed: category === 'missed' || Boolean(raw.isMissed),
     bias,
     riskPct,
-    entryPrice: typeof raw.entryPrice === 'number' ? raw.entryPrice : null,
-    slPrice: typeof raw.slPrice === 'number' ? raw.slPrice : null,
-    tpPrice: typeof raw.tpPrice === 'number' ? raw.tpPrice : null,
-    slPips: typeof raw.slPips === 'number' ? raw.slPips : null,
-    tpPips: typeof raw.tpPips === 'number' ? raw.tpPips : null,
-    targetRR: typeof raw.targetRR === 'number' ? raw.targetRR : null,
+    entryPrice: toFiniteOrNull(raw.entryPrice),
+    slPrice: toFiniteOrNull(raw.slPrice),
+    tpPrice: toFiniteOrNull(raw.tpPrice),
+    slPips: toFiniteOrNull(raw.slPips),
+    tpPips: toFiniteOrNull(raw.tpPips),
+    targetRR: toFiniteOrNull(raw.targetRR),
     outcome,
     netR,
-    rrMax: typeof raw.rrMax === 'number' ? raw.rrMax : null,
+    rrMax: toFiniteOrNull(raw.rrMax),
     netReturnPct: roundTo(netR * riskPct, 2),
     missedReason:
       category === 'missed'

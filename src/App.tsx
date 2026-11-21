@@ -44,6 +44,7 @@ import {
   type CloudUserSettings,
   deleteTradeInFirestore,
   ensureUserProfile,
+  fetchUserTradesFromFirestore,
   saveUserSettingsInFirestore,
   subscribeUserSettings,
   subscribeUserTrades,
@@ -551,11 +552,28 @@ export function App() {
     }
   };
 
-  const handleImportTrades = (imported: TradeRecord[]) => {
-    const existingPool =
+  const handleImportTrades = async (imported: TradeRecord[]) => {
+    let existingPool: TradeRecord[] =
       importCategory === 'backtest'
-        ? backtestTrades
+        ? [...backtestTrades]
         : [...liveTrades, ...missedTrades];
+
+    if (firebaseUser) {
+      try {
+        const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
+        const dbPool =
+          importCategory === 'backtest'
+            ? dbTrades.filter((tr) => tr.category === 'backtest')
+            : dbTrades.filter((tr) => tr.category !== 'backtest');
+        const byId = new Map<string, TradeRecord>();
+        dbPool.forEach((tr) => byId.set(tr.id, tr));
+        existingPool.forEach((tr) => byId.set(tr.id, tr));
+        existingPool = Array.from(byId.values());
+      } catch (err) {
+        setFatalError(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
+    }
 
     const { addedTrades, skippedDuplicates } = deduplicateImportedTrades(
       existingPool,
@@ -599,11 +617,12 @@ export function App() {
 
     if (firebaseUser && tradesToSyncCloud.length > 0) {
       tradesToSyncCloud.forEach((tr) => cloudIdsRef.current.add(tr.id));
-      void batchCreateTradesInFirestore(firebaseUser.uid, tradesToSyncCloud).catch(
-        (err) => {
-          setFatalError(err instanceof Error ? err : new Error(String(err)));
-        },
-      );
+      try {
+        await batchCreateTradesInFirestore(firebaseUser.uid, tradesToSyncCloud);
+      } catch (err) {
+        setFatalError(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
     }
 
     const perStrategy: Record<string, number> = {};
@@ -631,10 +650,10 @@ export function App() {
 
     const baseSummary =
       lang === 'en'
-        ? `Import completed: ${addedTrades.length} new trades added, ${skippedDuplicates} duplicates skipped`
+        ? `Import complete: ${addedTrades.length} new trades added, ${skippedDuplicates} duplicates ignored`
         : lang === 'es'
           ? `Importación completada: ${addedTrades.length} nuevos trades añadidos, ${skippedDuplicates} duplicados omitidos`
-          : `Importazione completata: ${addedTrades.length} nuovi trade aggiunti, ${skippedDuplicates} duplicati saltati`;
+          : `Importazione completata: ${addedTrades.length} nuovi trade aggiunti, ${skippedDuplicates} duplicati ignorati`;
 
     const details =
       addedTrades.length > 0
@@ -1156,58 +1175,102 @@ export function App() {
                       showToast('Nessuna operazione valida trovata nel file JSON.');
                       return;
                     }
-                    const mergeById = (
-                      existing: TradeRecord[],
-                      incoming: TradeRecord[],
+                    const mergeUniqueById = (
+                      a: TradeRecord[],
+                      b: TradeRecord[],
                     ) => {
                       const map = new Map<string, TradeRecord>();
-                      existing.forEach((tr) => map.set(tr.id, tr));
-                      incoming.forEach((tr) => map.set(tr.id, tr));
+                      a.forEach((tr) => map.set(tr.id, tr));
+                      b.forEach((tr) => map.set(tr.id, tr));
                       return Array.from(map.values());
                     };
-                    const nextBt = mergeById(backtestTrades, restored.backtest);
-                    const nextLive = mergeById(liveTrades, restored.live);
-                    const nextMissed = mergeById(missedTrades, restored.missed);
-                    setBacktestTrades(nextBt);
-                    setLiveTrades(nextLive);
-                    setMissedTrades(nextMissed);
-                    saveTradesSafely('backtest', nextBt);
-                    saveTradesSafely('live', nextLive);
-                    saveTradesSafely('missed', nextMissed);
+
+                    let existingBtPool = [...backtestTrades];
+                    let existingLiveMissedPool = [...liveTrades, ...missedTrades];
 
                     if (firebaseUser) {
-                      const restoredAll = [
-                        ...restored.backtest,
-                        ...restored.live,
-                        ...restored.missed,
-                      ];
-                      const newToCloud: TradeRecord[] = [];
-                      const updateInCloud: TradeRecord[] = [];
-                      restoredAll.forEach((tr) => {
-                        if (cloudIdsRef.current.has(tr.id)) {
-                          updateInCloud.push(tr);
-                        } else {
-                          cloudIdsRef.current.add(tr.id);
-                          newToCloud.push(tr);
-                        }
-                      });
                       try {
-                        if (newToCloud.length > 0) {
-                          await batchCreateTradesInFirestore(firebaseUser.uid, newToCloud);
-                        }
-                        for (const tr of updateInCloud) {
-                          await upsertTradeInFirestore(firebaseUser.uid, tr, true);
-                        }
+                        const dbTrades = await fetchUserTradesFromFirestore(
+                          firebaseUser.uid,
+                        );
+                        existingBtPool = mergeUniqueById(
+                          dbTrades.filter((tr) => tr.category === 'backtest'),
+                          existingBtPool,
+                        );
+                        existingLiveMissedPool = mergeUniqueById(
+                          dbTrades.filter((tr) => tr.category !== 'backtest'),
+                          existingLiveMissedPool,
+                        );
                       } catch (err) {
                         setFatalError(
                           err instanceof Error ? err : new Error(String(err)),
                         );
+                        return;
+                      }
+                    }
+
+                    const btDedup = deduplicateImportedTrades(
+                      existingBtPool,
+                      restored.backtest,
+                    );
+                    const liveDedup = deduplicateImportedTrades(
+                      existingLiveMissedPool,
+                      restored.live,
+                    );
+                    const missedDedup = deduplicateImportedTrades(
+                      [...existingLiveMissedPool, ...liveDedup.addedTrades],
+                      restored.missed,
+                    );
+
+                    const addedBt = btDedup.addedTrades;
+                    const addedLive = liveDedup.addedTrades;
+                    const addedMissed = missedDedup.addedTrades;
+                    const totalAdded =
+                      addedBt.length + addedLive.length + addedMissed.length;
+                    const totalSkipped =
+                      btDedup.skippedDuplicates +
+                      liveDedup.skippedDuplicates +
+                      missedDedup.skippedDuplicates;
+
+                    if (addedBt.length > 0) {
+                      const nextBt = [...backtestTrades, ...addedBt];
+                      setBacktestTrades(nextBt);
+                      saveTradesSafely('backtest', nextBt);
+                    }
+                    if (addedLive.length > 0) {
+                      const nextLive = [...liveTrades, ...addedLive];
+                      setLiveTrades(nextLive);
+                      saveTradesSafely('live', nextLive);
+                    }
+                    if (addedMissed.length > 0) {
+                      const nextMissed = [...missedTrades, ...addedMissed];
+                      setMissedTrades(nextMissed);
+                      saveTradesSafely('missed', nextMissed);
+                    }
+
+                    const allNewToCloud = [...addedBt, ...addedLive, ...addedMissed];
+                    if (firebaseUser && allNewToCloud.length > 0) {
+                      allNewToCloud.forEach((tr) => cloudIdsRef.current.add(tr.id));
+                      try {
+                        await batchCreateTradesInFirestore(
+                          firebaseUser.uid,
+                          allNewToCloud,
+                        );
+                      } catch (err) {
+                        setFatalError(
+                          err instanceof Error ? err : new Error(String(err)),
+                        );
+                        return;
                       }
                     }
 
                     showToast(
-                      `Backup JSON importato: ${restored.backtest.length} Backtest, ${restored.live.length} Journal Reale, ${restored.missed.length} Non Presi.`,
-                      6000,
+                      lang === 'en'
+                        ? `Import complete: ${totalAdded} new trades added, ${totalSkipped} duplicates ignored`
+                        : lang === 'es'
+                          ? `Importación completada: ${totalAdded} nuevos trades añadidos, ${totalSkipped} duplicados omitidos`
+                          : `Importazione completata: ${totalAdded} nuovi trade aggiunti, ${totalSkipped} duplicati ignorati`,
+                      9000,
                     );
                   } catch {
                     showToast('File JSON non valido o corrotto.');
@@ -1973,7 +2036,7 @@ export function App() {
         <div
           role="status"
           aria-live="polite"
-          className="pointer-events-none fixed right-5 bottom-5 z-50 rounded-md border border-emerald-500/40 bg-[#161D2B] px-4 py-3 text-xs font-medium text-emerald-200 shadow-xl"
+          className="pointer-events-none fixed right-4 bottom-4 left-4 z-50 rounded-md border border-emerald-500/40 bg-[#161D2B] px-4 py-3 text-xs font-medium text-emerald-200 shadow-xl sm:left-auto sm:right-5 sm:bottom-5 sm:max-w-lg"
         >
           {toast}
         </div>

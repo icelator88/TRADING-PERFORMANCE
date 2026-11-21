@@ -5,6 +5,7 @@ import {
   deleteField,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   query,
   serverTimestamp,
@@ -358,6 +359,32 @@ function docToTradeRecord(data: Record<string, unknown>, docId: string): TradeRe
   };
 
   return runRowCalculationEngine(base);
+}
+
+export async function fetchUserTradesFromFirestore(
+  uid: string,
+): Promise<TradeRecord[]> {
+  const safeUid = sanitizeId(uid, 'user');
+  const colPath = `users/${safeUid}/trades`;
+  const q = query(
+    collection(db, 'users', safeUid, 'trades'),
+    where('ownerId', '==', safeUid),
+  );
+
+  try {
+    const snapshot = await getDocs(q);
+    const list: TradeRecord[] = [];
+    snapshot.forEach((docSnap) => {
+      const parsed = docToTradeRecord(
+        docSnap.data() as Record<string, unknown>,
+        docSnap.id,
+      );
+      if (parsed) list.push(parsed);
+    });
+    return list;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, colPath);
+  }
 }
 
 export function subscribeUserTrades(
