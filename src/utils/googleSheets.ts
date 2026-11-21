@@ -5,26 +5,21 @@ import {
   parseExcelWorkbookBuffer,
 } from './importer';
 
-export const GOOGLE_SHEET_STRATEGY_TABS: Record<string, string> = {
-  S1: 'S1',
-  SSA: 'SSA',
-  MUTAZIONE: 'MUT',
-  'SBIL. DOMINANCE REALE': 'SBIL DOMINANCE REALE',
-  'SBIL. DOMINANCE INTRAS. 1CANDELA': 'SBIL INTRADOMINANCE',
-  // Excel/XLSX export caps worksheet names at 31 chars (truncates trailing "a")
-  'SBIL. DOMINANCE INTRAS. 1CANDEL': 'SBIL INTRADOMINANCE',
-};
-
 export function matchExactGoogleSheetStrategyTab(
   sheetName: string,
 ): string | null {
   const key = String(sheetName ?? '')
-    .replace(/\u00A0/g, ' ')
-    .trim()
-    .replace(/\s+/g, ' ')
+    .replace(/[\s.\u00A0]+/g, '')
     .toUpperCase();
   if (!key) return null;
-  return GOOGLE_SHEET_STRATEGY_TABS[key] ?? null;
+
+  if (key.includes('INTRA')) return 'SBIL INTRADOMINANCE';
+  if (key.includes('REALE')) return 'SBIL DOMINANCE REALE';
+  if (key.includes('MUT')) return 'MUT';
+  if (key.includes('SSA')) return 'SSA';
+  if (key.includes('S1')) return 'S1';
+
+  return null;
 }
 
 export interface ParsedGoogleSheetLink {
