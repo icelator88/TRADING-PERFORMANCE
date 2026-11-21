@@ -245,6 +245,84 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "GoogleSheetSource": {
+      "title": "GoogleSheetSource",
+      "description": "Saved multi-tab Google Sheet link paired with a trading asset for direct sync.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Document identifier.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "asset": {
+          "type": "string",
+          "description": "Trading asset symbol paired with the Google Sheet (e.g., CHF/JPY).",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "sheetUrl": {
+          "type": "string",
+          "description": "Google Sheets URL.",
+          "minLength": 20,
+          "maxLength": 500,
+          "pattern": "^https://docs\\.google\\.com/spreadsheets/.*"
+        },
+        "spreadsheetId": {
+          "type": "string",
+          "description": "Extracted Google Spreadsheet ID.",
+          "minLength": 10,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["backtest", "live"],
+          "description": "Target journal bucket for synced rows.",
+          "maxLength": 16
+        },
+        "lastSyncedAt": {
+          "type": "number",
+          "description": "Epoch timestamp in ms of the latest sync."
+        },
+        "lastSyncSummary": {
+          "type": "string",
+          "description": "Short summary of the latest sync.",
+          "maxLength": 160
+        },
+        "clientCreatedAt": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "asset",
+        "sheetUrl",
+        "spreadsheetId",
+        "category",
+        "clientCreatedAt",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -259,6 +337,10 @@
     "/users/{userId}/trades/{tradeId}": {
       "schema": { "$ref": "#/entities/Trade" },
       "description": "Per-user trading journal entries across Backtest, Live Journal, and Missed Trades."
+    },
+    "/users/{userId}/googleSheets/{sheetId}": {
+      "schema": { "$ref": "#/entities/GoogleSheetSource" },
+      "description": "Per-user saved Google Sheets paired with Asset names for direct multi-tab sync."
     }
   }
 }

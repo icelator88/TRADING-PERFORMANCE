@@ -3,6 +3,7 @@ import {
   Cloud,
   Download,
   FileJson,
+  FileSpreadsheet,
   LogOut,
   RotateCcw,
   Sparkles,
@@ -14,6 +15,10 @@ import { ConfirmModal } from './components/ConfirmModal';
 import { DrawdownChart } from './components/DrawdownChart';
 import { EquityChart } from './components/EquityChart';
 import { GeminiModal } from './components/GeminiModal';
+import {
+  type AssetSyncOutcome,
+  GoogleSheetsSyncModal,
+} from './components/GoogleSheetsSyncModal';
 import { ImportModal } from './components/ImportModal';
 import { InstitutionalMetricsPanel } from './components/InstitutionalMetricsPanel';
 import { LoginScreen } from './components/LoginScreen';
@@ -24,6 +29,7 @@ import { auth, signOutFirebase } from './firebase';
 import { TRANSLATIONS } from './i18n/translations';
 import {
   type ActiveTab,
+  type GoogleSheetSource,
   type Language,
   MISSED_REASONS,
   type TradeCategory,
@@ -42,15 +48,20 @@ import {
 import {
   batchCreateTradesInFirestore,
   type CloudUserSettings,
+  deleteGoogleSheetSourceInFirestore,
   deleteTradeInFirestore,
   ensureUserProfile,
   fetchUserTradesFromFirestore,
+  saveGoogleSheetSourceInFirestore,
   saveUserSettingsInFirestore,
+  subscribeUserGoogleSheets,
   subscribeUserSettings,
   subscribeUserTrades,
+  updateGoogleSheetSyncStatusInFirestore,
   upsertTradeInFirestore,
 } from './utils/firestoreSync';
 import { analizzaTradeConGemini, buildGeminiReviewPrompt } from './utils/geminiReview';
+import { fetchAndParseGoogleSheetTrades } from './utils/googleSheets';
 import {
   buildTradeDuplicateKey,
   deduplicateImportedTrades,
@@ -91,6 +102,9 @@ export function App() {
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [importCategory, setImportCategory] =
     useState<TradeCategory>('backtest');
+
+  const [googleSheets, setGoogleSheets] = useState<GoogleSheetSource[]>([]);
+  const [googleSheetsModalOpen, setGoogleSheetsModalOpen] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState<TradeRecord | null>(null);
   const [clearStorageConfirmOpen, setClearStorageConfirmOpen] = useState(false);
@@ -198,12 +212,15 @@ export function App() {
     let active = true;
     let unsubTrades: (() => void) | null = null;
     let unsubSettings: (() => void) | null = null;
+    let unsubSheets: (() => void) | null = null;
 
     const unsubAuth = onAuthStateChanged(auth, async (user) => {
       unsubTrades?.();
       unsubTrades = null;
       unsubSettings?.();
       unsubSettings = null;
+      unsubSheets?.();
+      unsubSheets = null;
 
       if (!active) return;
 
@@ -213,6 +230,7 @@ export function App() {
         setBacktestTrades([]);
         setLiveTrades([]);
         setMissedTrades([]);
+        setGoogleSheets([]);
         setFirebaseUser(null);
         setCloudSyncStatus('idle');
         setAuthReady(true);
@@ -352,12 +370,22 @@ export function App() {
           if (active) setFatalError(err);
         },
       );
+      unsubSheets = subscribeUserGoogleSheets(
+        user.uid,
+        (sources) => {
+          if (active) setGoogleSheets(sources);
+        },
+        (err) => {
+          if (active) setFatalError(err);
+        },
+      );
     });
 
     return () => {
       active = false;
       unsubTrades?.();
       unsubSettings?.();
+      unsubSheets?.();
       unsubAuth();
     };
   }, []);
@@ -368,6 +396,7 @@ export function App() {
       await signOutFirebase();
       setTradeModalOpen(false);
       setImportModalOpen(false);
+      setGoogleSheetsModalOpen(false);
       setDeleteTarget(null);
       setClearStorageConfirmOpen(false);
       setGeminiState((prev) => ({ ...prev, isOpen: false }));
@@ -650,10 +679,10 @@ export function App() {
 
     const baseSummary =
       lang === 'en'
-        ? `Import complete: ${addedTrades.length} new trades added, ${skippedDuplicates} duplicates ignored`
+        ? `Import complete: ${addedTrades.length} new trades added, ${skippedDuplicates} existing trades ignored`
         : lang === 'es'
-          ? `Importación completada: ${addedTrades.length} nuevos trades añadidos, ${skippedDuplicates} duplicados omitidos`
-          : `Importazione completata: ${addedTrades.length} nuovi trade aggiunti, ${skippedDuplicates} duplicati ignorati`;
+          ? `Importación completada: ${addedTrades.length} nuevas operaciones añadidas, ${skippedDuplicates} operaciones existentes omitidas`
+          : `Importazione completata: ${addedTrades.length} nuove operazioni aggiunte, ${skippedDuplicates} operazioni già esistenti ignorate`;
 
     const details =
       addedTrades.length > 0
@@ -661,6 +690,283 @@ export function App() {
         : '';
 
     showToast(`${baseSummary}${details}`, 9000);
+  };
+
+  const handleAddGoogleSheetSource = async (source: GoogleSheetSource) => {
+    if (!firebaseUser) return;
+    await saveGoogleSheetSourceInFirestore(firebaseUser.uid, source);
+    showToast(`Collegamento ${source.asset} salvato su Firebase.`);
+  };
+
+  const handleDeleteGoogleSheetSource = async (source: GoogleSheetSource) => {
+    if (!firebaseUser) return;
+    await deleteGoogleSheetSourceInFirestore(firebaseUser.uid, source.id);
+    showToast(`Collegamento ${source.asset} rimosso.`);
+  };
+
+  const runGoogleSheetSyncForSource = async (
+    source: GoogleSheetSource,
+    btPool: TradeRecord[],
+    livePool: TradeRecord[],
+  ): Promise<{
+    outcome: AssetSyncOutcome;
+    addedBt: TradeRecord[];
+    addedLive: TradeRecord[];
+    addedMissed: TradeRecord[];
+  }> => {
+    const fetched = await fetchAndParseGoogleSheetTrades(source);
+    const targetPool = source.category === 'backtest' ? btPool : livePool;
+
+    const { addedTrades, skippedDuplicates } = deduplicateImportedTrades(
+      targetPool,
+      fetched.trades,
+    );
+
+    const addedBt: TradeRecord[] = [];
+    const addedLive: TradeRecord[] = [];
+    const addedMissed: TradeRecord[] = [];
+
+    addedTrades.forEach((tr) => {
+      targetPool.push(tr);
+      if (source.category === 'backtest') {
+        addedBt.push(tr);
+      } else if (tr.category === 'missed') {
+        addedMissed.push(tr);
+      } else {
+        addedLive.push(tr);
+      }
+    });
+
+    const newForCloud = [...addedBt, ...addedLive, ...addedMissed];
+    if (firebaseUser && newForCloud.length > 0) {
+      newForCloud.forEach((tr) => cloudIdsRef.current.add(tr.id));
+      await batchCreateTradesInFirestore(firebaseUser.uid, newForCloud);
+    }
+
+    const summaryMsg =
+      lang === 'en'
+        ? `Sync complete (${source.asset}): ${addedTrades.length} new trades added, ${skippedDuplicates} duplicates ignored`
+        : lang === 'es'
+          ? `Sincronización completada (${source.asset}): ${addedTrades.length} nuevos trades añadidos, ${skippedDuplicates} duplicados omitidos`
+          : `Sincronizzazione completata (${source.asset}): ${addedTrades.length} nuovi trade aggiunti, ${skippedDuplicates} duplicati ignorati`;
+
+    const shortStatus = `+${addedTrades.length} nuovi · ${skippedDuplicates} duplicati`;
+    if (firebaseUser) {
+      await updateGoogleSheetSyncStatusInFirestore(
+        firebaseUser.uid,
+        source.id,
+        Date.now(),
+        shortStatus,
+      );
+    }
+
+    const tabsScanned =
+      fetched.matchedTabs.length > 0
+        ? fetched.matchedTabs.map((m) => `${m.strategy} (${m.rowCount})`)
+        : fetched.sheetNames;
+
+    return {
+      outcome: {
+        sourceId: source.id,
+        asset: source.asset,
+        status: 'success',
+        added: addedTrades.length,
+        skipped: skippedDuplicates,
+        tabsScanned,
+        message: summaryMsg,
+      },
+      addedBt,
+      addedLive,
+      addedMissed,
+    };
+  };
+
+  const handleSyncSingleGoogleSheet = async (
+    source: GoogleSheetSource,
+  ): Promise<AssetSyncOutcome> => {
+    const btPool = [...backtestTrades];
+    const livePool = [...liveTrades, ...missedTrades];
+
+    if (firebaseUser) {
+      try {
+        const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
+        const byIdBt = new Map<string, TradeRecord>();
+        const byIdLv = new Map<string, TradeRecord>();
+        dbTrades.forEach((tr) => {
+          if (tr.category === 'backtest') byIdBt.set(tr.id, tr);
+          else byIdLv.set(tr.id, tr);
+        });
+        btPool.forEach((tr) => byIdBt.set(tr.id, tr));
+        livePool.forEach((tr) => byIdLv.set(tr.id, tr));
+        btPool.splice(0, btPool.length, ...byIdBt.values());
+        livePool.splice(0, livePool.length, ...byIdLv.values());
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Errore di lettura da Firebase.';
+        return {
+          sourceId: source.id,
+          asset: source.asset,
+          status: 'error',
+          added: 0,
+          skipped: 0,
+          tabsScanned: [],
+          message,
+        };
+      }
+    }
+
+    try {
+      const { outcome, addedBt, addedLive, addedMissed } =
+        await runGoogleSheetSyncForSource(source, btPool, livePool);
+
+      const appendUniqueById = (prev: TradeRecord[], incoming: TradeRecord[]) => {
+        const map = new Map<string, TradeRecord>();
+        prev.forEach((tr) => map.set(tr.id, tr));
+        incoming.forEach((tr) => map.set(tr.id, tr));
+        return Array.from(map.values());
+      };
+
+      if (addedBt.length > 0) {
+        setBacktestTrades((prev) => {
+          const next = appendUniqueById(prev, addedBt);
+          saveTradesSafely('backtest', next);
+          return next;
+        });
+      }
+      if (addedLive.length > 0) {
+        setLiveTrades((prev) => {
+          const next = appendUniqueById(prev, addedLive);
+          saveTradesSafely('live', next);
+          return next;
+        });
+      }
+      if (addedMissed.length > 0) {
+        setMissedTrades((prev) => {
+          const next = appendUniqueById(prev, addedMissed);
+          saveTradesSafely('missed', next);
+          return next;
+        });
+      }
+
+      showToast(outcome.message, 8000);
+      return outcome;
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : `Errore durante il sync di ${source.asset}.`;
+      showToast(message, 8000);
+      return {
+        sourceId: source.id,
+        asset: source.asset,
+        status: 'error',
+        added: 0,
+        skipped: 0,
+        tabsScanned: [],
+        message,
+      };
+    }
+  };
+
+  const handleSyncAllGoogleSheets = async (
+    onProgress?: (currentIndex: number, total: number, asset: string) => void,
+  ): Promise<AssetSyncOutcome[]> => {
+    const btPool = [...backtestTrades];
+    const livePool = [...liveTrades, ...missedTrades];
+
+    if (firebaseUser) {
+      try {
+        const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
+        const byIdBt = new Map<string, TradeRecord>();
+        const byIdLv = new Map<string, TradeRecord>();
+        dbTrades.forEach((tr) => {
+          if (tr.category === 'backtest') byIdBt.set(tr.id, tr);
+          else byIdLv.set(tr.id, tr);
+        });
+        btPool.forEach((tr) => byIdBt.set(tr.id, tr));
+        livePool.forEach((tr) => byIdLv.set(tr.id, tr));
+        btPool.splice(0, btPool.length, ...byIdBt.values());
+        livePool.splice(0, livePool.length, ...byIdLv.values());
+      } catch (err) {
+        setFatalError(err instanceof Error ? err : new Error(String(err)));
+        return [];
+      }
+    }
+
+    const outcomes: AssetSyncOutcome[] = [];
+    const allAddedBt: TradeRecord[] = [];
+    const allAddedLive: TradeRecord[] = [];
+    const allAddedMissed: TradeRecord[] = [];
+
+    for (let i = 0; i < googleSheets.length; i++) {
+      const src = googleSheets[i];
+      onProgress?.(i + 1, googleSheets.length, src.asset);
+      try {
+        const res = await runGoogleSheetSyncForSource(src, btPool, livePool);
+        outcomes.push(res.outcome);
+        allAddedBt.push(...res.addedBt);
+        allAddedLive.push(...res.addedLive);
+        allAddedMissed.push(...res.addedMissed);
+      } catch (err) {
+        outcomes.push({
+          sourceId: src.id,
+          asset: src.asset,
+          status: 'error',
+          added: 0,
+          skipped: 0,
+          tabsScanned: [],
+          message:
+            err instanceof Error
+              ? err.message
+              : `Errore durante la sincronizzazione di ${src.asset}.`,
+        });
+      }
+    }
+
+    const appendUniqueById = (prev: TradeRecord[], incoming: TradeRecord[]) => {
+      const map = new Map<string, TradeRecord>();
+      prev.forEach((tr) => map.set(tr.id, tr));
+      incoming.forEach((tr) => map.set(tr.id, tr));
+      return Array.from(map.values());
+    };
+
+    if (allAddedBt.length > 0) {
+      setBacktestTrades((prev) => {
+        const next = appendUniqueById(prev, allAddedBt);
+        saveTradesSafely('backtest', next);
+        return next;
+      });
+    }
+    if (allAddedLive.length > 0) {
+      setLiveTrades((prev) => {
+        const next = appendUniqueById(prev, allAddedLive);
+        saveTradesSafely('live', next);
+        return next;
+      });
+    }
+    if (allAddedMissed.length > 0) {
+      setMissedTrades((prev) => {
+        const next = appendUniqueById(prev, allAddedMissed);
+        saveTradesSafely('missed', next);
+        return next;
+      });
+    }
+
+    const totalAdded = outcomes.reduce((s, o) => s + o.added, 0);
+    const totalSkipped = outcomes.reduce((s, o) => s + o.skipped, 0);
+    const errorCount = outcomes.filter((o) => o.status === 'error').length;
+
+    const baseAllMsg =
+      lang === 'en'
+        ? `Sync complete: ${totalAdded} new trades added, ${totalSkipped} duplicates ignored`
+        : lang === 'es'
+          ? `Sincronización completada: ${totalAdded} nuevos trades añadidos, ${totalSkipped} duplicados omitidos`
+          : `Sincronizzazione completata: ${totalAdded} nuovi trade aggiunti, ${totalSkipped} duplicati ignorati`;
+
+    showToast(
+      errorCount > 0 ? `${baseAllMsg} (${errorCount} asset con errore)` : baseAllMsg,
+      9000,
+    );
+
+    return outcomes;
   };
 
   const loadDemoTrades = (target: TradeCategory) => {
@@ -1096,6 +1402,22 @@ export function App() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
+            {activeTab === 'dashboard' || activeTab === 'backtest' || activeTab === 'live' ? (
+              <button
+                type="button"
+                onClick={() => setGoogleSheetsModalOpen(true)}
+                className="inline-flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3.5 py-2 text-xs font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/20 whitespace-nowrap shrink-0"
+              >
+                <FileSpreadsheet className="h-3.5 w-3.5" />
+                <span>Sync Google Sheets</span>
+                {googleSheets.length > 0 ? (
+                  <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 font-mono text-[10px] text-emerald-200">
+                    {googleSheets.length}
+                  </span>
+                ) : null}
+              </button>
+            ) : null}
+
             {activeTab === 'backtest' || activeTab === 'live' ? (
               <button
                 type="button"
@@ -1266,10 +1588,10 @@ export function App() {
 
                     showToast(
                       lang === 'en'
-                        ? `Import complete: ${totalAdded} new trades added, ${totalSkipped} duplicates ignored`
+                        ? `Import complete: ${totalAdded} new trades added, ${totalSkipped} existing trades ignored`
                         : lang === 'es'
-                          ? `Importación completada: ${totalAdded} nuevos trades añadidos, ${totalSkipped} duplicados omitidos`
-                          : `Importazione completata: ${totalAdded} nuovi trade aggiunti, ${totalSkipped} duplicati ignorati`,
+                          ? `Importación completada: ${totalAdded} nuevas operaciones añadidas, ${totalSkipped} operaciones existentes omitidas`
+                          : `Importazione completata: ${totalAdded} nuove operazioni aggiunte, ${totalSkipped} operazioni già esistenti ignorate`,
                       9000,
                     );
                   } catch {
@@ -1662,25 +1984,33 @@ export function App() {
 
             <InstitutionalMetricsPanel stats={backtestStats} lang={lang} />
 
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder={t.journal.searchPlaceholder}
-                className="w-full max-w-xs rounded-md border border-[#263042] bg-[#121721] px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
+            <div className="space-y-3 rounded-lg border border-[#1E2634] bg-[#121721]/60 p-3.5">
+              <SetupFilterBar
+                selectedSetup={selectedSetup}
+                onSelectSetup={handleSetupChange}
+                availableCustomSetups={customSetups}
+                label={t.common.filterBySetup}
               />
-              <select
-                value={outcomeFilter}
-                onChange={(e) => setOutcomeFilter(e.target.value)}
-                className="rounded-md border border-[#263042] bg-[#121721] px-3 py-1.5 text-xs text-slate-200"
-              >
-                <option value="ALL">{t.journal.outcomeFilterAll}</option>
-                <option value="TP">TP</option>
-                <option value="STOP LOSS">STOP LOSS</option>
-                <option value="BE">BE</option>
-                <option value="UNFILLED">UNFILLED</option>
-              </select>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder={t.journal.searchPlaceholder}
+                  className="w-full max-w-xs rounded-md border border-[#263042] bg-[#0B0E14] px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
+                />
+                <select
+                  value={outcomeFilter}
+                  onChange={(e) => setOutcomeFilter(e.target.value)}
+                  className="rounded-md border border-[#263042] bg-[#0B0E14] px-3 py-1.5 text-xs text-slate-200"
+                >
+                  <option value="ALL">{t.journal.outcomeFilterAll}</option>
+                  <option value="TP">TP</option>
+                  <option value="STOP LOSS">STOP LOSS</option>
+                  <option value="BE">BE</option>
+                  <option value="UNFILLED">UNFILLED</option>
+                </select>
+              </div>
             </div>
 
             <TradeTable
@@ -1785,25 +2115,33 @@ export function App() {
 
             <InstitutionalMetricsPanel stats={liveStats} lang={lang} />
 
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder={t.journal.searchPlaceholder}
-                className="w-full max-w-xs rounded-md border border-[#263042] bg-[#121721] px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
+            <div className="space-y-3 rounded-lg border border-[#1E2634] bg-[#121721]/60 p-3.5">
+              <SetupFilterBar
+                selectedSetup={selectedSetup}
+                onSelectSetup={handleSetupChange}
+                availableCustomSetups={customSetups}
+                label={t.common.filterBySetup}
               />
-              <select
-                value={outcomeFilter}
-                onChange={(e) => setOutcomeFilter(e.target.value)}
-                className="rounded-md border border-[#263042] bg-[#121721] px-3 py-1.5 text-xs text-slate-200"
-              >
-                <option value="ALL">{t.journal.outcomeFilterAll}</option>
-                <option value="TP">TP</option>
-                <option value="STOP LOSS">STOP LOSS</option>
-                <option value="BE">BE</option>
-                <option value="UNFILLED">UNFILLED</option>
-              </select>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder={t.journal.searchPlaceholder}
+                  className="w-full max-w-xs rounded-md border border-[#263042] bg-[#0B0E14] px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
+                />
+                <select
+                  value={outcomeFilter}
+                  onChange={(e) => setOutcomeFilter(e.target.value)}
+                  className="rounded-md border border-[#263042] bg-[#0B0E14] px-3 py-1.5 text-xs text-slate-200"
+                >
+                  <option value="ALL">{t.journal.outcomeFilterAll}</option>
+                  <option value="TP">TP</option>
+                  <option value="STOP LOSS">STOP LOSS</option>
+                  <option value="BE">BE</option>
+                  <option value="UNFILLED">UNFILLED</option>
+                </select>
+              </div>
             </div>
 
             <TradeTable
@@ -1947,26 +2285,34 @@ export function App() {
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder={t.journal.searchPlaceholder}
-                className="w-full max-w-xs rounded-md border border-[#263042] bg-[#121721] px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
+            <div className="space-y-3 rounded-lg border border-[#1E2634] bg-[#121721]/60 p-3.5">
+              <SetupFilterBar
+                selectedSetup={selectedSetup}
+                onSelectSetup={handleSetupChange}
+                availableCustomSetups={customSetups}
+                label={t.common.filterBySetup}
               />
-              <select
-                value={reasonFilter}
-                onChange={(e) => setReasonFilter(e.target.value)}
-                className="rounded-md border border-[#263042] bg-[#121721] px-3 py-1.5 text-xs text-slate-200"
-              >
-                <option value="ALL">{t.journal.reasonFilterAll}</option>
-                {MISSED_REASONS.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
-                  </option>
-                ))}
-              </select>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder={t.journal.searchPlaceholder}
+                  className="w-full max-w-xs rounded-md border border-[#263042] bg-[#0B0E14] px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
+                />
+                <select
+                  value={reasonFilter}
+                  onChange={(e) => setReasonFilter(e.target.value)}
+                  className="rounded-md border border-[#263042] bg-[#0B0E14] px-3 py-1.5 text-xs text-slate-200"
+                >
+                  <option value="ALL">{t.journal.reasonFilterAll}</option>
+                  {MISSED_REASONS.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <TradeTable
@@ -2066,6 +2412,19 @@ export function App() {
         t={t}
         onClose={() => setImportModalOpen(false)}
         onImport={handleImportTrades}
+      />
+
+      <GoogleSheetsSyncModal
+        isOpen={googleSheetsModalOpen}
+        lang={lang}
+        defaultCategory={activeTab === 'live' ? 'live' : 'backtest'}
+        sources={googleSheets}
+        knownAssets={availableAssets}
+        onClose={() => setGoogleSheetsModalOpen(false)}
+        onAddSource={handleAddGoogleSheetSource}
+        onDeleteSource={handleDeleteGoogleSheetSource}
+        onSyncSingle={handleSyncSingleGoogleSheet}
+        onSyncAll={handleSyncAllGoogleSheets}
       />
 
       <ConfirmModal

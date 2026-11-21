@@ -149,7 +149,12 @@ export function normalizeSetupName(raw: string | undefined | null): string {
     return 'SSA';
   }
 
-  if (lower === 'mut' || lower === 'mutation' || lower === 'mutazione') {
+  if (
+    lower === 'mut' ||
+    lower === 'mutation' ||
+    lower === 'mutazione' ||
+    lower.includes('mutazion')
+  ) {
     return 'MUT';
   }
 
@@ -164,7 +169,8 @@ export function normalizeSetupName(raw: string | undefined | null): string {
     lower === 'sewell2000' ||
     lower === 'russell 2000' ||
     lower === 'russell2000' ||
-    lower === 'svel domin'
+    lower === 'svel domin' ||
+    lower.includes('dominance reale')
   ) {
     return 'SBIL DOMINANCE REALE';
   }
@@ -173,13 +179,21 @@ export function normalizeSetupName(raw: string | undefined | null): string {
     lower === 'sbil intradominance' ||
     lower === 'sbil. intradominance' ||
     lower === 'sbilanciamento intradominance' ||
+    lower === 'sbil. dominance intras. 1candela' ||
+    lower === 'sbil dominance intras 1candela' ||
+    lower === 'sbil. dominance intras. 1 candela' ||
+    lower === 'sbil dominance intras. 1 candela' ||
     lower === 'intra-asian imbalance' ||
     lower === 'seriale bill' ||
     lower === 'seriale è bill' ||
     lower === 'seriale e bill' ||
     lower === 'serialebill' ||
     lower === 'intra dominance' ||
-    lower === 'intradominance'
+    lower === 'intradominance' ||
+    lower.includes('intradominance') ||
+    lower.includes('intras') ||
+    lower.includes('1candela') ||
+    lower.includes('1 candela')
   ) {
     return 'SBIL INTRADOMINANCE';
   }

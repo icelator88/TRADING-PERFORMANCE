@@ -185,3 +185,14 @@ export interface ParsedSheetData {
   blockCounts: number[];
   isExcelSheet?: boolean;
 }
+
+export interface GoogleSheetSource {
+  id: string;
+  asset: string;
+  sheetUrl: string;
+  spreadsheetId: string;
+  category: 'backtest' | 'live';
+  lastSyncedAt?: number;
+  lastSyncSummary?: string;
+  createdAt: number;
+}

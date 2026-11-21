@@ -164,6 +164,43 @@ service cloud.firestore {
         && (!('extraColumns' in data) || (data.extraColumns is map && data.extraColumns.size() <= 20));
     }
 
+    function isValidGoogleSheetSource(data, userId, sheetId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'asset', 'sheetUrl', 'spreadsheetId', 'category',
+          'clientCreatedAt', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'asset', 'sheetUrl', 'spreadsheetId', 'category',
+          'lastSyncedAt', 'lastSyncSummary', 'clientCreatedAt', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == sheetId
+        && isValidId(data.id)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.asset is string
+        && data.asset.size() >= 1
+        && data.asset.size() <= 32
+        && data.sheetUrl is string
+        && data.sheetUrl.size() >= 20
+        && data.sheetUrl.size() <= 500
+        && data.sheetUrl.matches('^https://docs\\.google\\.com/spreadsheets/.*')
+        && data.spreadsheetId is string
+        && data.spreadsheetId.size() >= 10
+        && data.spreadsheetId.size() <= 128
+        && data.spreadsheetId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.category is string
+        && data.category.size() <= 16
+        && data.category in ['backtest', 'live']
+        && isOptionalNumber(data, 'lastSyncedAt', 0, 9999999999999)
+        && isOptionalSmallString(data, 'lastSyncSummary', 160)
+        && data.clientCreatedAt is number
+        && data.clientCreatedAt >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     match /users/{userId} {
       allow get: if isValidId(userId) && isOwner(userId);
       allow list: if false;
@@ -255,6 +292,43 @@ service cloud.firestore {
         allow delete: if isAuthenticatedAccount()
           && isValidId(userId)
           && isValidId(tradeId)
+          && isOwner(userId)
+          && parentUserExists(userId);
+      }
+
+      match /googleSheets/{sheetId} {
+        allow get: if isValidId(userId)
+          && isValidId(sheetId)
+          && isOwner(userId)
+          && parentUserExists(userId);
+        allow list: if isValidId(userId)
+          && isOwner(userId)
+          && resource.data.ownerId == request.auth.uid;
+        allow create: if isAuthenticatedAccount()
+          && isValidId(userId)
+          && isValidId(sheetId)
+          && isOwner(userId)
+          && isValidGoogleSheetSource(incoming(), userId, sheetId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && parentUserExists(userId);
+        allow update: if isAuthenticatedAccount()
+          && isValidId(userId)
+          && isValidId(sheetId)
+          && isOwner(userId)
+          && isValidGoogleSheetSource(incoming(), userId, sheetId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && parentUserExists(userId)
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'asset', 'sheetUrl', 'spreadsheetId', 'category',
+            'lastSyncedAt', 'lastSyncSummary', 'updatedAt'
+          ]);
+        allow delete: if isAuthenticatedAccount()
+          && isValidId(userId)
+          && isValidId(sheetId)
           && isOwner(userId)
           && parentUserExists(userId);
       }

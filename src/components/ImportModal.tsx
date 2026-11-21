@@ -23,7 +23,7 @@ interface ImportModalProps {
   existingTrades: TradeRecord[];
   t: TranslationSet;
   onClose: () => void;
-  onImport: (trades: TradeRecord[]) => void;
+  onImport: (trades: TradeRecord[]) => void | Promise<void>;
 }
 
 const MAPPING_OPTIONS: { value: MappingField; label: string }[] = [
@@ -63,6 +63,7 @@ export function ImportModal({
   const [importAsset, setImportAsset] = useState<string>('CHF/JPY');
   const [error, setError] = useState<string>('');
   const [loading, setLoading] = useState(false);
+  const [importingToCloud, setImportingToCloud] = useState(false);
 
   if (!isOpen) return null;
 
@@ -132,16 +133,21 @@ export function ImportModal({
 
   const previewTrades = allCandidateTrades.slice(0, 8);
 
-  const handleConfirmImport = () => {
-    if (sheets.length === 0) return;
+  const handleConfirmImport = async () => {
+    if (sheets.length === 0 || importingToCloud) return;
 
     if (allCandidateTrades.length === 0) {
       setError('Nessuna riga con data valida trovata per l’importazione.');
       return;
     }
-    onImport(allCandidateTrades);
-    setSheets([]);
-    onClose();
+    setImportingToCloud(true);
+    try {
+      await onImport(allCandidateTrades);
+      setSheets([]);
+      onClose();
+    } finally {
+      setImportingToCloud(false);
+    }
   };
 
   return (
@@ -390,18 +396,19 @@ export function ImportModal({
         <div className="flex items-center justify-end gap-3 border-t border-[#1E2634] px-6 py-4 text-xs">
           <button
             type="button"
+            disabled={importingToCloud}
             onClick={onClose}
-            className="rounded-md border border-[#263042] px-4 py-2 font-medium text-slate-300 hover:bg-[#1B2230]"
+            className="rounded-md border border-[#263042] px-4 py-2 font-medium text-slate-300 hover:bg-[#1B2230] disabled:opacity-40"
           >
             {t.importer.cancel}
           </button>
           <button
             type="button"
-            disabled={!activeSheet || totalDetectedRows === 0}
-            onClick={handleConfirmImport}
+            disabled={!activeSheet || totalDetectedRows === 0 || importingToCloud}
+            onClick={() => void handleConfirmImport()}
             className="rounded-md bg-sky-600 px-5 py-2 font-semibold text-white hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {t.importer.importNow}
+            {importingToCloud ? 'Verifica & Salvataggio Firebase...' : t.importer.importNow}
           </button>
         </div>
       </div>

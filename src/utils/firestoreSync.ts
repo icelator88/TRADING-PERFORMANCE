@@ -16,7 +16,13 @@ import {
   type Unsubscribe,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import type { ActiveTab, Language, TradeCategory, TradeRecord } from '../types/trading';
+import type {
+  ActiveTab,
+  GoogleSheetSource,
+  Language,
+  TradeCategory,
+  TradeRecord,
+} from '../types/trading';
 import {
   normalizeOutcome,
   normalizeSetupName,
@@ -483,6 +489,150 @@ export async function deleteTradeInFirestore(
   const safeId = sanitizeId(tradeId, 'tr');
   const docPath = `users/${safeUid}/trades/${safeId}`;
   const ref = doc(db, 'users', safeUid, 'trades', safeId);
+
+  try {
+    await deleteDoc(ref);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, docPath);
+  }
+}
+
+function docToGoogleSheetSource(
+  data: Record<string, unknown>,
+  docId: string,
+): GoogleSheetSource | null {
+  const asset = String(data.asset ?? '').trim().toUpperCase();
+  const sheetUrl = String(data.sheetUrl ?? '').trim();
+  const spreadsheetId = String(data.spreadsheetId ?? '').trim();
+  if (!asset || !sheetUrl || !spreadsheetId) return null;
+
+  return {
+    id: typeof data.id === 'string' && data.id ? data.id : docId,
+    asset,
+    sheetUrl,
+    spreadsheetId,
+    category: data.category === 'live' ? 'live' : 'backtest',
+    lastSyncedAt:
+      typeof data.lastSyncedAt === 'number' && Number.isFinite(data.lastSyncedAt)
+        ? data.lastSyncedAt
+        : undefined,
+    lastSyncSummary:
+      typeof data.lastSyncSummary === 'string' && data.lastSyncSummary
+        ? data.lastSyncSummary
+        : undefined,
+    createdAt:
+      typeof data.clientCreatedAt === 'number' && Number.isFinite(data.clientCreatedAt)
+        ? data.clientCreatedAt
+        : Date.now(),
+  };
+}
+
+export function subscribeUserGoogleSheets(
+  uid: string,
+  onSources: (sources: GoogleSheetSource[]) => void,
+  onError?: (error: Error) => void,
+): Unsubscribe {
+  const safeUid = sanitizeId(uid, 'user');
+  const colPath = `users/${safeUid}/googleSheets`;
+  const q = query(
+    collection(db, 'users', safeUid, 'googleSheets'),
+    where('ownerId', '==', safeUid),
+  );
+
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list: GoogleSheetSource[] = [];
+      snapshot.forEach((docSnap) => {
+        const parsed = docToGoogleSheetSource(
+          docSnap.data() as Record<string, unknown>,
+          docSnap.id,
+        );
+        if (parsed) list.push(parsed);
+      });
+      list.sort((a, b) => a.createdAt - b.createdAt);
+      onSources(list);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.GET, colPath);
+      } catch (wrapped) {
+        if (onError && wrapped instanceof Error) {
+          onError(wrapped);
+        }
+      }
+    },
+  );
+}
+
+export async function saveGoogleSheetSourceInFirestore(
+  uid: string,
+  source: GoogleSheetSource,
+): Promise<void> {
+  const safeUid = sanitizeId(uid, 'user');
+  const safeId = sanitizeId(source.id, 'gs');
+  const docPath = `users/${safeUid}/googleSheets/${safeId}`;
+  const ref = doc(db, 'users', safeUid, 'googleSheets', safeId);
+
+  const safeAsset = (source.asset.trim().toUpperCase() || 'ASSET').slice(0, 32);
+  const safeSpreadsheetId = source.spreadsheetId
+    .trim()
+    .replace(/[^a-zA-Z0-9_\-]/g, '')
+    .slice(0, 128);
+  const safeUrl = source.sheetUrl.trim().slice(0, 500);
+  const safeCategory: 'backtest' | 'live' =
+    source.category === 'live' ? 'live' : 'backtest';
+
+  try {
+    await setDoc(ref, {
+      id: safeId,
+      ownerId: safeUid,
+      asset: safeAsset,
+      sheetUrl: safeUrl,
+      spreadsheetId: safeSpreadsheetId,
+      category: safeCategory,
+      clientCreatedAt:
+        typeof source.createdAt === 'number' && Number.isFinite(source.createdAt)
+          ? source.createdAt
+          : Date.now(),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, docPath);
+  }
+}
+
+export async function updateGoogleSheetSyncStatusInFirestore(
+  uid: string,
+  sourceId: string,
+  lastSyncedAt: number,
+  lastSyncSummary: string,
+): Promise<void> {
+  const safeUid = sanitizeId(uid, 'user');
+  const safeId = sanitizeId(sourceId, 'gs');
+  const docPath = `users/${safeUid}/googleSheets/${safeId}`;
+  const ref = doc(db, 'users', safeUid, 'googleSheets', safeId);
+
+  try {
+    await updateDoc(ref, {
+      lastSyncedAt: Math.max(0, Math.floor(lastSyncedAt)),
+      lastSyncSummary: lastSyncSummary.trim().slice(0, 160),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, docPath);
+  }
+}
+
+export async function deleteGoogleSheetSourceInFirestore(
+  uid: string,
+  sourceId: string,
+): Promise<void> {
+  const safeUid = sanitizeId(uid, 'user');
+  const safeId = sanitizeId(sourceId, 'gs');
+  const docPath = `users/${safeUid}/googleSheets/${safeId}`;
+  const ref = doc(db, 'users', safeUid, 'googleSheets', safeId);
 
   try {
     await deleteDoc(ref);

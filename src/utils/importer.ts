@@ -63,6 +63,10 @@ const KNOWN_SHEET_ALIASES = new Set<string>([
   'sbil intradominance',
   'sbil. intradominance',
   'sbilanciamento intradominance',
+  'sbil. dominance intras. 1candela',
+  'sbil dominance intras 1candela',
+  'sbil. dominance intras. 1 candela',
+  'sbil dominance intras. 1 candela',
   'intra-asian imbalance',
   'seriale bill',
   'seriale è bill',
@@ -87,10 +91,18 @@ const STRICT_HEADERS = [
   'LINK',
 ] as const;
 
-function matchKnownSheetStrategy(sheetName: string): string | null {
+export function matchKnownSheetStrategy(sheetName: string): string | null {
   const normalizedSpace = sheetName.trim().toLowerCase().replace(/\s+/g, ' ');
   if (!normalizedSpace) return null;
-  if (KNOWN_SHEET_ALIASES.has(normalizedSpace)) {
+  if (
+    KNOWN_SHEET_ALIASES.has(normalizedSpace) ||
+    normalizedSpace.includes('mutazion') ||
+    normalizedSpace.includes('dominance reale') ||
+    normalizedSpace.includes('intradominance') ||
+    normalizedSpace.includes('intras') ||
+    normalizedSpace.includes('1candela') ||
+    normalizedSpace.includes('1 candela')
+  ) {
     return normalizeSetupName(normalizedSpace);
   }
   return null;
@@ -342,22 +354,60 @@ export function normalizeOpenTimestamp(date: unknown, entryTime?: unknown): stri
 }
 
 export function buildTradeDuplicateKey(
-  trade: Pick<TradeRecord, 'date' | 'entryTime' | 'asset' | 'bias' | 'entryPrice' | 'netR'>,
+  trade: Pick<
+    TradeRecord,
+    | 'date'
+    | 'entryTime'
+    | 'exitTime'
+    | 'asset'
+    | 'setup'
+    | 'strategy'
+    | 'bias'
+    | 'outcome'
+    | 'riskPct'
+    | 'entryPrice'
+    | 'slPrice'
+    | 'tpPrice'
+    | 'netR'
+    | 'netReturnPct'
+  >,
 ): string {
   const openTimestamp = normalizeOpenTimestamp(trade.date, trade.entryTime);
+  const exitTimeKey = trade.exitTime ? normalizeImportTime(trade.exitTime) : 'NONE';
   const symbol = String(trade.asset ?? '').trim().toUpperCase();
+  const setupStrategy = normalizeSetupName(
+    trade.setup || trade.strategy || 'S1',
+  )
+    .trim()
+    .toUpperCase();
   const direction =
     String(trade.bias ?? '').trim().toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
-  const entryNum =
-    typeof trade.entryPrice === 'number' && Number.isFinite(trade.entryPrice) && trade.entryPrice > 0
-      ? Number(trade.entryPrice.toFixed(6))
-      : null;
-  const entryKey = entryNum !== null ? String(entryNum) : 'NONE';
-  const rawNetR = Number.isFinite(trade.netR) ? roundTo(trade.netR, 2) : 0;
-  const safeNetR = Object.is(rawNetR, -0) || rawNetR === 0 ? 0 : rawNetR;
-  const netRKey = safeNetR.toFixed(2);
+  const outcomeKey = normalizeOutcome(trade.outcome);
 
-  return `${openTimestamp}|${symbol}|${direction}|${entryKey}|${netRKey}`;
+  const normalizePrice = (val: unknown): string => {
+    return typeof val === 'number' && Number.isFinite(val) && val > 0
+      ? String(Number(val.toFixed(6)))
+      : 'NONE';
+  };
+  const entryKey = normalizePrice(trade.entryPrice);
+  const slKey = normalizePrice(trade.slPrice);
+  const tpKey = normalizePrice(trade.tpPrice);
+
+  const normalize2dp = (val: number): string => {
+    const raw = Number.isFinite(val) ? roundTo(val, 2) : 0;
+    const safe = Object.is(raw, -0) || raw === 0 ? 0 : raw;
+    return safe.toFixed(2);
+  };
+
+  const netRVal = Number.isFinite(trade.netR) ? trade.netR : 0;
+  const returnPctVal = Number.isFinite(trade.netReturnPct)
+    ? trade.netReturnPct
+    : netRVal * (Number.isFinite(trade.riskPct) ? trade.riskPct : 1);
+
+  const netRKey = normalize2dp(netRVal);
+  const returnPctKey = normalize2dp(returnPctVal);
+
+  return `${openTimestamp}|${exitTimeKey}|${symbol}|${setupStrategy}|${direction}|${outcomeKey}|${netRKey}|${returnPctKey}|${entryKey}|${slKey}|${tpKey}`;
 }
 
 export function deduplicateImportedTrades(
@@ -429,16 +479,159 @@ function detectCsvDelimiter(lines: string[]): string {
   return semis > commas ? ';' : ',';
 }
 
+interface ResolvedColIndices {
+  date: number;
+  day: number;
+  session: number;
+  time: number;
+  bias: number;
+  overnight: number;
+  notes: number;
+  outcome: number;
+  netR: number;
+  rrMax: number;
+  rProg: number;
+  link: number;
+  maxMappedCol: number;
+}
+
+const DEFAULT_COL_INDICES: ResolvedColIndices = {
+  date: 0,
+  day: 1,
+  session: 2,
+  time: 3,
+  bias: 4,
+  overnight: 5,
+  notes: 6,
+  outcome: 7,
+  netR: 8,
+  rrMax: 9,
+  rProg: 10,
+  link: 11,
+  maxMappedCol: 11,
+};
+
+function resolveHeaderColumns(row: unknown[]): {
+  isHeader: boolean;
+  cols: ResolvedColIndices | null;
+} {
+  const c0Upper = String(row[0] ?? '').trim().toUpperCase();
+  const normalizedCells = row.map((cell) =>
+    String(cell ?? '')
+      .trim()
+      .toUpperCase()
+      .replace(/\s+/g, ' '),
+  );
+
+  let matchedNamedCount = 0;
+  const detected: Partial<ResolvedColIndices> = {};
+  let maxIdx = 0;
+
+  normalizedCells.forEach((label, idx) => {
+    if (!label) return;
+    if ((label === 'DATA' || label === 'DATE') && detected.date === undefined) {
+      detected.date = idx;
+      matchedNamedCount++;
+      maxIdx = Math.max(maxIdx, idx);
+    } else if ((label === 'GIORNO' || label === 'DAY') && detected.day === undefined) {
+      detected.day = idx;
+      matchedNamedCount++;
+      maxIdx = Math.max(maxIdx, idx);
+    } else if ((label === 'SESSIONE' || label === 'SESSION') && detected.session === undefined) {
+      detected.session = idx;
+      matchedNamedCount++;
+      maxIdx = Math.max(maxIdx, idx);
+    } else if ((label === 'ORARIO' || label === 'ORA' || label === 'TIME') && detected.time === undefined) {
+      detected.time = idx;
+      matchedNamedCount++;
+      maxIdx = Math.max(maxIdx, idx);
+    } else if ((label === 'BIAS' || label === 'DIREZIONE' || label === 'DIRECTION') && detected.bias === undefined) {
+      detected.bias = idx;
+      matchedNamedCount++;
+      maxIdx = Math.max(maxIdx, idx);
+    } else if ((label === 'OVER NIGHT' || label === 'OVERNIGHT') && detected.overnight === undefined) {
+      detected.overnight = idx;
+      matchedNamedCount++;
+      maxIdx = Math.max(maxIdx, idx);
+    } else if ((label === 'NOTE' || label === 'NOTES' || label === 'COMMENTO') && detected.notes === undefined) {
+      detected.notes = idx;
+      matchedNamedCount++;
+      maxIdx = Math.max(maxIdx, idx);
+    } else if ((label === 'ESITO' || label === 'OUTCOME' || label === 'RISULTATO') && detected.outcome === undefined) {
+      detected.outcome = idx;
+      matchedNamedCount++;
+      maxIdx = Math.max(maxIdx, idx);
+    } else if (
+      (label === '# R' || label === '#R' || label === 'R' || label === 'NET R' || label === 'R NETTO') &&
+      detected.netR === undefined
+    ) {
+      detected.netR = idx;
+      matchedNamedCount++;
+      maxIdx = Math.max(maxIdx, idx);
+    } else if ((label === 'RR MAX' || label === 'RRMAX' || label === 'MAX RR') && detected.rrMax === undefined) {
+      detected.rrMax = idx;
+      matchedNamedCount++;
+      maxIdx = Math.max(maxIdx, idx);
+    } else if (
+      (label === 'R PROGRESS' || label === 'R PROGRESSIVI' || label === 'PROGRESSIVE R' || label === 'R PROGR') &&
+      detected.rProg === undefined
+    ) {
+      detected.rProg = idx;
+      matchedNamedCount++;
+      maxIdx = Math.max(maxIdx, idx);
+    } else if (
+      (label === 'LINK' || label === 'URL' || label === 'TRADINGVIEW' || label === 'TV' || label === 'GRAFICO' || label === 'CHART') &&
+      detected.link === undefined
+    ) {
+      detected.link = idx;
+      matchedNamedCount++;
+      maxIdx = Math.max(maxIdx, idx);
+    }
+  });
+
+  if (matchedNamedCount >= 3 && (detected.date !== undefined || detected.outcome !== undefined)) {
+    const baseCol = detected.date ?? 0;
+    return {
+      isHeader: true,
+      cols: {
+        date: detected.date ?? baseCol,
+        day: detected.day ?? baseCol + 1,
+        session: detected.session ?? baseCol + 2,
+        time: detected.time ?? baseCol + 3,
+        bias: detected.bias ?? baseCol + 4,
+        overnight: detected.overnight ?? baseCol + 5,
+        notes: detected.notes ?? baseCol + 6,
+        outcome: detected.outcome ?? baseCol + 7,
+        netR: detected.netR ?? baseCol + 8,
+        rrMax: detected.rrMax ?? baseCol + 9,
+        rProg: detected.rProg ?? baseCol + 10,
+        link: detected.link ?? Math.max(maxIdx + 1, baseCol + 11),
+        maxMappedCol: Math.max(maxIdx, baseCol + 11),
+      },
+    };
+  }
+
+  if (c0Upper.includes('DATA') || c0Upper.includes('COLONNA')) {
+    return { isHeader: true, cols: null };
+  }
+
+  return { isHeader: false, cols: null };
+}
+
+function isHttpUrl(val: string): boolean {
+  return /^https?:\/\/\S+/i.test(val.trim());
+}
+
 /**
- * Bulletproof parser for the user's exact 12-column structure (index 0..11):
- * - Starts at blockIndex = -1.
- * - Increments blockIndex++ every time row[0] uppercase contains "DATA" or "COLONNA 1" (or "COLONNA").
- * - Valid trade iff row[0] is non-empty, does not contain DATA/COLONNA, AND row[7] (ESITO) trimmed is non-empty.
+ * Header-aware + stacked-block parser supporting both:
+ * 1) Exact named columns (DATA, GIORNO, SESSIONE, ORARIO, BIAS, OVER NIGHT, NOTE, ESITO, # R, RR MAX, R PROGRESS, plus URL/Link on the right)
+ * 2) Classic stacked "Colonna 1" 12-column Excel blocks
  */
 function rowsMatrixToParsedSheet(
   sheetName: string,
   matrix: unknown[][],
   isExcelSheet = false,
+  hyperlinksByRowCol?: Map<string, string>,
 ): ParsedSheetData {
   const knownSheetStrategy = isExcelSheet
     ? matchKnownSheetStrategy(sheetName)
@@ -447,23 +640,30 @@ function rowsMatrixToParsedSheet(
   let blockIndex = -1;
   const blockCounts: number[] = [];
   const parsedRows: Record<string, string>[] = [];
+  let activeCols: ResolvedColIndices = DEFAULT_COL_INDICES;
 
   for (let r = 0; r < matrix.length; r++) {
     const row = Array.isArray(matrix[r]) ? matrix[r] : [];
-    const c0Raw = row[0];
-    const c0Str = String(c0Raw ?? '').trim();
-    const c0Upper = c0Str.toUpperCase();
+    const headerCheck = resolveHeaderColumns(row);
 
-    // Header variation check ("DATA", "Colonna 1", "Colonna 1 ", etc.)
-    if (c0Upper.includes('DATA') || c0Upper.includes('COLONNA')) {
+    if (headerCheck.isHeader) {
       blockIndex++;
       while (blockCounts.length <= blockIndex) blockCounts.push(0);
+      if (headerCheck.cols) {
+        activeCols = headerCheck.cols;
+      }
       continue;
     }
 
-    // Strict row validation:
-    // row[0] (Date) NOT empty, NOT containing DATA/COLONNA, AND row[7] (ESITO) NOT empty
-    const esitoTrimmed = String(row[7] ?? '').trim();
+    const c0Raw = row[activeCols.date];
+    const c0Str = String(c0Raw ?? '').trim();
+    const c0Upper = c0Str.toUpperCase();
+    if (c0Upper.includes('DATA') || c0Upper.includes('COLONNA')) {
+      continue;
+    }
+
+    // Strict row validation: skip empty rows where DATA or ESITO is empty
+    const esitoTrimmed = String(row[activeCols.outcome] ?? '').trim();
     if (!c0Str || !esitoTrimmed) {
       continue;
     }
@@ -474,37 +674,65 @@ function rowsMatrixToParsedSheet(
     const dateIso = normalizeImportDate(c0Raw);
     if (!dateIso) continue;
 
-    const rVal = parseNumericRCell(row[8]);
-    const rrMaxVal = parseNumericRCell(row[9]);
-    const rProgVal = parseNumericRCell(row[10]);
+    const rVal = parseNumericRCell(row[activeCols.netR]);
+    const rrMaxVal = parseNumericRCell(row[activeCols.rrMax]);
+    const rProgVal = parseNumericRCell(row[activeCols.rProg]);
 
     const stackedStrategy =
       STACKED_BLOCK_SETUPS[effectiveBlockIndex] ??
       STACKED_BLOCK_SETUPS[STACKED_BLOCK_SETUPS.length - 1];
 
-    // If the sheet is named after a known strategy AND has only 1 block (blockIndex <= 0),
-    // use the normalized sheet strategy; otherwise map strictly by blockIndex (0..4).
+    // If the sheet tab is named after a known strategy AND has only 1 block (blockIndex <= 0),
+    // use the normalized sheet strategy; otherwise map by blockIndex (0..4).
     const assignedStrategy =
       knownSheetStrategy && effectiveBlockIndex === 0
         ? knownSheetStrategy
         : stackedStrategy;
 
     const embeddedTime = extractEmbeddedTime(c0Raw);
-    const parsedTime = formatExcelTimeCell(row[3]) || embeddedTime;
+    const parsedTime = formatExcelTimeCell(row[activeCols.time]) || embeddedTime;
+
+    // Extract URL from mapped LINK column, cell hyperlink target, or any rightmost URL column
+    let resolvedLink = '';
+    const linkColText = String(row[activeCols.link] ?? '').trim();
+    const linkColHref = hyperlinksByRowCol?.get(`${r}:${activeCols.link}`) ?? '';
+    if (isHttpUrl(linkColHref)) {
+      resolvedLink = linkColHref.trim();
+    } else if (isHttpUrl(linkColText)) {
+      resolvedLink = linkColText;
+    } else {
+      const scanStart = Math.max(activeCols.rProg + 1, activeCols.rrMax + 1, activeCols.link);
+      for (let c = scanStart; c < row.length; c++) {
+        const href = hyperlinksByRowCol?.get(`${r}:${c}`) ?? '';
+        const cellText = String(row[c] ?? '').trim();
+        if (isHttpUrl(href)) {
+          resolvedLink = href.trim();
+          break;
+        }
+        if (isHttpUrl(cellText)) {
+          resolvedLink = cellText;
+          break;
+        }
+      }
+      if (!resolvedLink && linkColText) {
+        resolvedLink = linkColText;
+      }
+    }
 
     const rowObj: Record<string, string> = {
       DATA: dateIso,
-      GIORNO: String(row[1] ?? '').trim(),
-      SESSIONE: String(row[2] ?? '').trim(),
+      GIORNO: String(row[activeCols.day] ?? '').trim(),
+      SESSIONE: String(row[activeCols.session] ?? '').trim(),
       ORARIO: parsedTime,
-      BIAS: String(row[4] ?? '').trim().toUpperCase(),
-      OVERNIGHT: String(row[5] ?? '').trim(),
-      NOTE: String(row[6] ?? '').trim(),
+      BIAS: String(row[activeCols.bias] ?? '').trim().toUpperCase(),
+      OVERNIGHT: String(row[activeCols.overnight] ?? '').trim(),
+      NOTE: String(row[activeCols.notes] ?? '').trim(),
       ESITO: esitoTrimmed.toUpperCase(),
       R: String(rVal !== null ? rVal : 0),
       'RR MAX': rrMaxVal !== null ? String(rrMaxVal) : '',
-      'R PROGRESSIVI': rProgVal !== null ? String(rProgVal) : String(row[10] ?? '').trim(),
-      LINK: String(row[11] ?? '').trim(),
+      'R PROGRESSIVI':
+        rProgVal !== null ? String(rProgVal) : String(row[activeCols.rProg] ?? '').trim(),
+      LINK: resolvedLink,
       __blockSetup: assignedStrategy,
     };
 
@@ -521,6 +749,66 @@ function rowsMatrixToParsedSheet(
     detectedFiveBlocks,
     blockCounts,
     isExcelSheet,
+  };
+}
+
+function extractSheetHyperlinks(
+  XLSX: typeof XLSXModule,
+  sheet: XLSXModule.WorkSheet,
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const addr of Object.keys(sheet)) {
+    if (addr.startsWith('!')) continue;
+    const cell = sheet[addr] as XLSXModule.CellObject | undefined;
+    const target = cell?.l?.Target;
+    if (typeof target === 'string' && target.trim()) {
+      const decoded = XLSX.utils.decode_cell(addr);
+      map.set(`${decoded.r}:${decoded.c}`, target.trim());
+    }
+  }
+  return map;
+}
+
+export function parseExcelWorkbookBuffer(arrayBuffer: ArrayBuffer): {
+  sheets: ParsedSheetData[];
+  sheetNames: string[];
+} {
+  if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+    throw new Error('La cartella di lavoro Excel è vuota.');
+  }
+
+  const XLSX = getXlsxLib();
+  let workbook: XLSXModule.WorkBook;
+  try {
+    workbook = XLSX.read(new Uint8Array(arrayBuffer), {
+      type: 'array',
+      cellDates: false,
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : 'struttura non valida';
+    throw new Error(`Impossibile leggere il file Excel (${detail}).`);
+  }
+
+  if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
+    throw new Error('La cartella di lavoro Excel non contiene alcun foglio.');
+  }
+
+  const sheets = workbook.SheetNames.map((sheetName) => {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) return null;
+    const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+      header: 1,
+      defval: '',
+      blankrows: true,
+      raw: true,
+    });
+    const hyperlinks = extractSheetHyperlinks(XLSX, sheet);
+    return rowsMatrixToParsedSheet(sheetName, matrix, true, hyperlinks);
+  }).filter((s): s is ParsedSheetData => s !== null && s.rows.length > 0);
+
+  return {
+    sheets,
+    sheetNames: workbook.SheetNames,
   };
 }
 
@@ -543,46 +831,16 @@ export async function parseUploadedFile(file: File): Promise<ParsedSheetData[]> 
   }
 
   if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
-    const XLSX = getXlsxLib();
     const arrayBuffer = await readFileAsArrayBuffer(file);
-    if (!arrayBuffer || arrayBuffer.byteLength === 0) {
-      throw new Error('Il file Excel selezionato è vuoto.');
-    }
+    const { sheets, sheetNames } = parseExcelWorkbookBuffer(arrayBuffer);
 
-    let workbook: XLSXModule.WorkBook;
-    try {
-      workbook = XLSX.read(new Uint8Array(arrayBuffer), {
-        type: 'array',
-        cellDates: false,
-      });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : 'struttura non valida';
-      throw new Error(`Impossibile leggere il file Excel (${detail}).`);
-    }
-
-    if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
-      throw new Error('La cartella di lavoro Excel non contiene alcun foglio.');
-    }
-
-    const parsedSheets = workbook.SheetNames.map((sheetName) => {
-      const sheet = workbook.Sheets[sheetName];
-      if (!sheet) return null;
-      const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
-        header: 1,
-        defval: '',
-        blankrows: false,
-        raw: true,
-      });
-      return rowsMatrixToParsedSheet(sheetName, matrix, true);
-    }).filter((s): s is ParsedSheetData => s !== null && s.rows.length > 0);
-
-    if (parsedSheets.length === 0) {
+    if (sheets.length === 0) {
       throw new Error(
-        `Nessun trade valido trovato nei fogli (${workbook.SheetNames.join(', ')}).`,
+        `Nessun trade valido trovato nei fogli (${sheetNames.join(', ')}).`,
       );
     }
 
-    return parsedSheets;
+    return sheets;
   }
 
   if (name.endsWith('.pdf') || file.type === 'application/pdf') {
@@ -720,6 +978,8 @@ export function buildTradesFromSheet(
       setup = normalizeSetupName(setupOverride);
     } else if (rawRow.__blockSetup) {
       setup = normalizeSetupName(rawRow.__blockSetup);
+    } else if (fieldValues.setup) {
+      setup = normalizeSetupName(fieldValues.setup);
     } else if (sheet.isExcelSheet) {
       setup = normalizeSetupName(sheet.sheetName);
     }
