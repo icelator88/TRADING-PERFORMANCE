@@ -2,7 +2,10 @@ import type { TranslationSet } from '../i18n/translations';
 
 interface ConfirmModalProps {
   isOpen: boolean;
+  title?: string;
   message: string;
+  confirmLabel?: string;
+  isBusy?: boolean;
   t: TranslationSet;
   onCancel: () => void;
   onConfirm: () => void;
@@ -10,7 +13,10 @@ interface ConfirmModalProps {
 
 export function ConfirmModal({
   isOpen,
+  title,
   message,
+  confirmLabel,
+  isBusy = false,
   t,
   onCancel,
   onConfirm,
@@ -26,23 +32,25 @@ export function ConfirmModal({
     >
       <div className="w-full max-w-md rounded-lg border border-[#263042] bg-[#121721] p-6 shadow-2xl">
         <h3 id="confirm-modal-title" className="text-base font-semibold text-slate-100">
-          {t.confirm.deleteTitle}
+          {title ?? t.confirm.deleteTitle}
         </h3>
         <p className="mt-2 text-xs leading-relaxed text-slate-300">{message}</p>
         <div className="mt-6 flex items-center justify-end gap-3 border-t border-[#1E2634] pt-4">
           <button
             type="button"
+            disabled={isBusy}
             onClick={onCancel}
-            className="rounded-md border border-[#263042] px-4 py-2 text-xs font-medium text-slate-300 transition-colors hover:bg-[#1B2230]"
+            className="rounded-md border border-[#263042] px-4 py-2 text-xs font-medium text-slate-300 transition-colors hover:bg-[#1B2230] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {t.confirm.cancel}
           </button>
           <button
             type="button"
+            disabled={isBusy}
             onClick={onConfirm}
-            className="rounded-md bg-rose-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-rose-500"
+            className="rounded-md bg-rose-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {t.confirm.confirm}
+            {confirmLabel ?? t.confirm.confirm}
           </button>
         </div>
       </div>

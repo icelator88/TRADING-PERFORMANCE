@@ -80,6 +80,7 @@ import {
 } from './utils/storage';
 
 const LAST_UID_STORAGE_KEY = 'diariotrade_last_uid_v1';
+const CLOUD_MIGRATED_UID_STORAGE_KEY = 'diariotrade_cloud_migrated_uid_v1';
 
 export function App() {
   const [lang, setLang] = useState<Language>(() => loadLanguagePreference());
@@ -111,7 +112,8 @@ export function App() {
   const [cleaningDuplicates, setCleaningDuplicates] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState<TradeRecord | null>(null);
-  const [clearStorageConfirmOpen, setClearStorageConfirmOpen] = useState(false);
+  const [resetSectionTarget, setResetSectionTarget] = useState<TradeCategory | null>(null);
+  const [resettingSection, setResettingSection] = useState(false);
 
   const [geminiState, setGeminiState] = useState({
     isOpen: false,
@@ -299,14 +301,18 @@ export function App() {
             initialSyncDoneRef.current = true;
 
             let previousUid: string | null = null;
+            let migratedUid: string | null = null;
             try {
               previousUid = localStorage.getItem(LAST_UID_STORAGE_KEY);
+              migratedUid = localStorage.getItem(CLOUD_MIGRATED_UID_STORAGE_KEY);
               localStorage.setItem(LAST_UID_STORAGE_KEY, user.uid);
             } catch {
               previousUid = null;
+              migratedUid = null;
             }
 
-            const canMigrateLocal = !previousUid || previousUid === user.uid;
+            const canMigrateLocal =
+              migratedUid !== user.uid && (!previousUid || previousUid === user.uid);
             const localLoaded = canMigrateLocal
               ? loadAllTradesSafely()
               : { backtest: [], live: [], missed: [] };
@@ -350,6 +356,11 @@ export function App() {
 
               try {
                 await batchCreateTradesInFirestore(user.uid, localOnlyTrades);
+                try {
+                  localStorage.setItem(CLOUD_MIGRATED_UID_STORAGE_KEY, user.uid);
+                } catch {
+                  // ignore storage errors
+                }
                 if (active) setCloudSyncStatus('synced');
               } catch (err) {
                 if (active) {
@@ -357,6 +368,12 @@ export function App() {
                 }
               }
               return;
+            }
+
+            try {
+              localStorage.setItem(CLOUD_MIGRATED_UID_STORAGE_KEY, user.uid);
+            } catch {
+              // ignore storage errors
             }
           }
 
@@ -402,7 +419,7 @@ export function App() {
       setImportModalOpen(false);
       setGoogleSheetsModalOpen(false);
       setDeleteTarget(null);
-      setClearStorageConfirmOpen(false);
+      setResetSectionTarget(null);
       setGeminiState((prev) => ({ ...prev, isOpen: false }));
     } catch {
       showToast(
@@ -1083,6 +1100,88 @@ export function App() {
     }
   };
 
+  const getSectionDisplayName = (cat: TradeCategory) =>
+    cat === 'backtest' ? t.nav.backtest : cat === 'live' ? t.nav.live : t.nav.missed;
+
+  const handleConfirmResetSection = async () => {
+    if (!resetSectionTarget || resettingSection) return;
+    const targetCategory = resetSectionTarget;
+    const sectionLabel = getSectionDisplayName(targetCategory);
+    setResettingSection(true);
+
+    try {
+      const localSectionTrades =
+        targetCategory === 'backtest'
+          ? backtestTrades
+          : targetCategory === 'live'
+            ? liveTrades
+            : missedTrades;
+
+      const idsSet = new Set<string>(localSectionTrades.map((tr) => tr.id));
+
+      if (firebaseUser) {
+        const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
+        dbTrades.forEach((tr) => {
+          if (tr.category === targetCategory) {
+            idsSet.add(tr.id);
+          }
+        });
+      }
+
+      const idsToDelete = Array.from(idsSet);
+
+      if (firebaseUser && idsToDelete.length > 0) {
+        await batchDeleteTradesInFirestore(firebaseUser.uid, idsToDelete);
+        idsToDelete.forEach((id) => cloudIdsRef.current.delete(id));
+      }
+
+      if (firebaseUser) {
+        try {
+          localStorage.setItem(CLOUD_MIGRATED_UID_STORAGE_KEY, firebaseUser.uid);
+        } catch {
+          // ignore storage errors
+        }
+      }
+
+      if (targetCategory === 'backtest') {
+        setBacktestTrades([]);
+        saveTradesSafely('backtest', []);
+      } else if (targetCategory === 'live') {
+        setLiveTrades([]);
+        saveTradesSafely('live', []);
+      } else {
+        setMissedTrades([]);
+        saveTradesSafely('missed', []);
+      }
+
+      setResetSectionTarget(null);
+
+      if (idsToDelete.length === 0) {
+        showToast(
+          lang === 'en'
+            ? `No trades to reset in ${sectionLabel}.`
+            : lang === 'es'
+              ? `No hay operaciones para restablecer en ${sectionLabel}.`
+              : `Nessun trade presente da eliminare nella sezione ${sectionLabel}.`,
+          5000,
+        );
+      } else {
+        showToast(
+          lang === 'en'
+            ? `Reset complete (${sectionLabel}): ${idsToDelete.length} trades permanently deleted from Firebase.`
+            : lang === 'es'
+              ? `Restablecimiento completado (${sectionLabel}): ${idsToDelete.length} operaciones eliminadas permanentemente de Firebase.`
+              : `Reset completato (${sectionLabel}): ${idsToDelete.length} trade eliminati definitivamente da Firebase.`,
+          7000,
+        );
+      }
+    } catch (err) {
+      setFatalError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setResettingSection(false);
+    }
+  };
+
   const loadDemoTrades = (target: TradeCategory) => {
     const today = new Date();
     const offsetIso = (daysAgo: number) => {
@@ -1736,14 +1835,17 @@ export function App() {
               {t.journal.geminiReview}
             </button>
 
-            <button
-              type="button"
-              onClick={() => setClearStorageConfirmOpen(true)}
-              className="inline-flex items-center gap-2 rounded-md border border-rose-500/35 bg-rose-500/10 px-3.5 py-2 text-xs font-medium text-rose-300 transition-colors hover:bg-rose-500/20 whitespace-nowrap shrink-0"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              {t.journal.resetData}
-            </button>
+            {activeTab === 'backtest' || activeTab === 'live' || activeTab === 'missed' ? (
+              <button
+                type="button"
+                disabled={resettingSection}
+                onClick={() => setResetSectionTarget(activeTab)}
+                className="inline-flex items-center gap-2 rounded-md border border-rose-500/35 bg-rose-500/10 px-3.5 py-2 text-xs font-medium text-rose-300 transition-colors hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50 whitespace-nowrap shrink-0"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                {t.journal.resetData}
+              </button>
+            ) : null}
           </div>
         </div>
 
@@ -2562,18 +2664,52 @@ export function App() {
       />
 
       <ConfirmModal
-        isOpen={clearStorageConfirmOpen}
-        message={
-          lang === 'en'
-            ? 'Do you want to reset all saved data in localStorage and reload the application? Make sure you exported a CSV or JSON backup first.'
-            : "Vuoi resettare tutti i dati salvati in localStorage e ricaricare l'applicazione? Assicurati di aver esportato un backup CSV o JSON prima di procedere."
+        isOpen={resetSectionTarget !== null}
+        title={
+          resetSectionTarget
+            ? lang === 'en'
+              ? `Reset ${getSectionDisplayName(resetSectionTarget)}`
+              : lang === 'es'
+                ? `Restablecer ${getSectionDisplayName(resetSectionTarget)}`
+                : `Resetta ${getSectionDisplayName(resetSectionTarget)}`
+            : t.confirm.deleteTitle
         }
+        message={(() => {
+          if (!resetSectionTarget) return '';
+          const sectionName = getSectionDisplayName(resetSectionTarget);
+          const count =
+            resetSectionTarget === 'backtest'
+              ? backtestTrades.length
+              : resetSectionTarget === 'live'
+                ? liveTrades.length
+                : missedTrades.length;
+          if (lang === 'en') {
+            return `Are you sure you want to permanently delete all ${count} trades in "${sectionName}" from Firebase? Trades in the other sections will NOT be modified.`;
+          }
+          if (lang === 'es') {
+            return `¿Seguro que quieres eliminar permanentemente las ${count} operaciones de "${sectionName}" de Firebase? Las operaciones de las demás secciones NO se modificarán.`;
+          }
+          return `Vuoi eliminare definitivamente tutti i ${count} trade della sezione "${sectionName}" da Firebase? Le altre sezioni non verranno modificate.`;
+        })()}
+        confirmLabel={
+          resettingSection
+            ? lang === 'en'
+              ? 'Deleting...'
+              : lang === 'es'
+                ? 'Eliminando...'
+                : 'Eliminazione...'
+            : lang === 'en'
+              ? 'Delete Section Data'
+              : lang === 'es'
+                ? 'Eliminar Sección'
+                : 'Elimina Sezione'
+        }
+        isBusy={resettingSection}
         t={t}
-        onCancel={() => setClearStorageConfirmOpen(false)}
-        onConfirm={() => {
-          localStorage.clear();
-          window.location.reload();
+        onCancel={() => {
+          if (!resettingSection) setResetSectionTarget(null);
         }}
+        onConfirm={() => void handleConfirmResetSection()}
       />
 
       <GeminiModal
