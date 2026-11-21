@@ -10,7 +10,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import type { GoogleSheetSource, Language } from '../types/trading';
+import type { GoogleSheetSource, Language, TradeCategory } from '../types/trading';
 import {
   generateGoogleSheetSourceId,
   parseGoogleSheetUrl,
@@ -29,7 +29,7 @@ export interface AssetSyncOutcome {
 interface GoogleSheetsSyncModalProps {
   isOpen: boolean;
   lang: Language;
-  defaultCategory: 'backtest' | 'live';
+  defaultCategory: TradeCategory;
   sources: GoogleSheetSource[];
   knownAssets: string[];
   onClose: () => void;
@@ -83,7 +83,7 @@ export function GoogleSheetsSyncModal({
 }: GoogleSheetsSyncModalProps) {
   const [assetInput, setAssetInput] = useState('');
   const [urlInput, setUrlInput] = useState('');
-  const [categoryInput, setCategoryInput] = useState<'backtest' | 'live'>(
+  const [categoryInput, setCategoryInput] = useState<TradeCategory>(
     defaultCategory,
   );
   const [formError, setFormError] = useState('');
@@ -144,8 +144,14 @@ export function GoogleSheetsSyncModal({
         s.category === categoryInput,
     );
     if (duplicateSource) {
+      const catLabel =
+        categoryInput === 'backtest'
+          ? 'Backtest'
+          : categoryInput === 'missed'
+            ? 'Trade Non Presi'
+            : 'Journal Reale';
       setFormError(
-        `Questo foglio Google è già collegato a ${cleanAsset} (${categoryInput === 'backtest' ? 'Backtest' : 'Journal Reale'}).`,
+        `Questo foglio Google è già collegato a ${cleanAsset} (${catLabel}).`,
       );
       return;
     }
@@ -328,15 +334,21 @@ export function GoogleSheetsSyncModal({
                 </label>
                 <select
                   value={categoryInput}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const val = e.target.value;
                     setCategoryInput(
-                      e.target.value === 'live' ? 'live' : 'backtest',
-                    )
-                  }
+                      val === 'live'
+                        ? 'live'
+                        : val === 'missed'
+                          ? 'missed'
+                          : 'backtest',
+                    );
+                  }}
                   className="w-full rounded-md border border-[#263042] bg-[#121721] px-2.5 py-2 text-xs text-slate-100 focus:border-sky-500 focus:outline-none"
                 >
                   <option value="backtest">Backtest</option>
                   <option value="live">Journal Reale</option>
+                  <option value="missed">Trade Non Presi</option>
                 </select>
               </div>
 
@@ -429,12 +441,16 @@ export function GoogleSheetsSyncModal({
                               className={`rounded border px-2 py-0.5 text-[10px] font-semibold uppercase ${
                                 src.category === 'live'
                                   ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-300'
-                                  : 'border-indigo-500/35 bg-indigo-500/10 text-indigo-300'
+                                  : src.category === 'missed'
+                                    ? 'border-amber-500/35 bg-amber-500/10 text-amber-300'
+                                    : 'border-indigo-500/35 bg-indigo-500/10 text-indigo-300'
                               }`}
                             >
                               {src.category === 'live'
                                 ? 'Journal Reale'
-                                : 'Backtest'}
+                                : src.category === 'missed'
+                                  ? 'Trade Non Presi'
+                                  : 'Backtest'}
                             </span>
                             {src.lastSyncedAt ? (
                               <span className="font-mono text-[10px] text-slate-500">

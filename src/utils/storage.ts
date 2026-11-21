@@ -78,10 +78,7 @@ function coerceLegacyTrade(
         ? raw.note
         : '';
 
-  if (
-    category === 'live' &&
-    (outcome === 'UNFILLED' || notesStr.toUpperCase().includes('NON PRESO'))
-  ) {
+  if (category === 'live' && notesStr.toUpperCase().includes('NON PRESO')) {
     category = 'missed';
   }
 

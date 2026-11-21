@@ -1,4 +1,4 @@
-import type { GoogleSheetSource, TradeRecord } from '../types/trading';
+import type { GoogleSheetSource, TradeCategory, TradeRecord } from '../types/trading';
 import {
   autoDetectColumnMapping,
   buildTradesFromSheet,
@@ -109,7 +109,7 @@ function hasXlsxMagicBytes(buffer: ArrayBuffer): boolean {
 export function parseGoogleSheetWorkbookBuffer(
   arrayBuffer: ArrayBuffer,
   assetName: string,
-  category: 'backtest' | 'live',
+  category: TradeCategory,
 ): GoogleSheetFetchResult {
   const cleanAsset = assetName.trim().toUpperCase();
   const { sheets, sheetNames } = parseExcelWorkbookBuffer(arrayBuffer, {

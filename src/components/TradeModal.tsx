@@ -124,14 +124,13 @@ export function TradeModal({
 
     const trimmedNotes = notes.trim();
     const isMissedLive =
-      category === 'live' &&
-      (outcome === 'UNFILLED' || trimmedNotes.toUpperCase().includes('NON PRESO'));
+      category === 'live' && trimmedNotes.toUpperCase().includes('NON PRESO');
     const effectiveCategory: TradeCategory = isMissedLive ? 'missed' : category;
 
     const finalRecord = runRowCalculationEngine({
       ...previewRecord,
       category: effectiveCategory,
-      isMissed: effectiveCategory === 'missed' || outcome === 'UNFILLED',
+      isMissed: effectiveCategory === 'missed',
       id: editingTrade?.id || generateTradeId(effectiveCategory.slice(0, 2)),
       asset: asset.trim().toUpperCase(),
       setup: canonicalSetup,

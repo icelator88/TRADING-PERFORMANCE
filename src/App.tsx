@@ -40,6 +40,7 @@ import {
   calculateAkinatorBacktestScan,
   calculateMissedStats,
   calculatePerformanceStats,
+  formatDisplayDate,
   formatPct,
   formatR,
   generateTradeId,
@@ -96,6 +97,9 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [outcomeFilter, setOutcomeFilter] = useState('ALL');
   const [reasonFilter, setReasonFilter] = useState('ALL');
+  const [dashboardRangeMode, setDashboardRangeMode] = useState<
+    'live_period' | 'all_backtest'
+  >('live_period');
 
   // Modals
   const [tradeModalOpen, setTradeModalOpen] = useState(false);
@@ -465,11 +469,14 @@ export function App() {
       filterBySetupAndAsset(liveTrades).filter(
         (tr) =>
           tr.category === 'live' &&
-          tr.outcome !== 'UNFILLED' &&
-          !tr.isMissed &&
-          !(tr.notes ?? '').toUpperCase().includes('NON PRESO'),
+          !(tr.notes ?? '').toUpperCase().includes('NON PRESO') &&
+          (!tr.isMissed || tr.outcome === 'UNFILLED'),
       ),
     [liveTrades, selectedSetup, assetFilter],
+  );
+  const executedLiveForAdherence = useMemo(
+    () => filteredLive.filter((tr) => tr.outcome !== 'UNFILLED' && !tr.isMissed),
+    [filteredLive],
   );
   const filteredMissed = useMemo(
     () => filterBySetupAndAsset(missedTrades),
@@ -488,15 +495,73 @@ export function App() {
     [filteredBacktest],
   );
 
-  // Live Journaling stats strictly calculate ONLY executed live trades (zero NON PRESO / missed trades)
+  // Live Journaling stats include tracked UNFILLED setups in totalTrades/unfilled, while Win Rate % excludes UNFILLED
   const liveStats = useMemo(
     () => calculatePerformanceStats(filteredLive),
     [filteredLive],
   );
 
   const missedStats = useMemo(
-    () => calculateMissedStats(filteredLive, filteredMissed),
-    [filteredLive, filteredMissed],
+    () => calculateMissedStats(executedLiveForAdherence, filteredMissed),
+    [executedLiveForAdherence, filteredMissed],
+  );
+
+  // Earliest live trade date in Journal Reale (YYYY-MM-DD) for aligned Dashboard comparison
+  const liveStartDate = useMemo(() => {
+    const validFilteredDates = filteredLive
+      .map((tr) => tr.date)
+      .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
+    if (validFilteredDates.length > 0) {
+      return validFilteredDates.reduce(
+        (min, d) => (d < min ? d : min),
+        validFilteredDates[0],
+      );
+    }
+    const validAllLiveDates = liveTrades
+      .filter(
+        (tr) =>
+          tr.category === 'live' &&
+          !(tr.notes ?? '').toUpperCase().includes('NON PRESO') &&
+          (!tr.isMissed || tr.outcome === 'UNFILLED'),
+      )
+      .map((tr) => tr.date)
+      .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
+    if (validAllLiveDates.length > 0) {
+      return validAllLiveDates.reduce(
+        (min, d) => (d < min ? d : min),
+        validAllLiveDates[0],
+      );
+    }
+    return null;
+  }, [filteredLive, liveTrades]);
+
+  const isLiveAligned =
+    dashboardRangeMode === 'live_period' && liveStartDate !== null;
+
+  const dashboardBacktestTrades = useMemo(
+    () =>
+      isLiveAligned && liveStartDate
+        ? filteredBacktest.filter((tr) => tr.date >= liveStartDate)
+        : filteredBacktest,
+    [filteredBacktest, isLiveAligned, liveStartDate],
+  );
+
+  const dashboardMissedTrades = useMemo(
+    () =>
+      isLiveAligned && liveStartDate
+        ? filteredMissed.filter((tr) => tr.date >= liveStartDate)
+        : filteredMissed,
+    [filteredMissed, isLiveAligned, liveStartDate],
+  );
+
+  const dashboardBacktestStats = useMemo(
+    () => calculatePerformanceStats(dashboardBacktestTrades),
+    [dashboardBacktestTrades],
+  );
+
+  const dashboardMissedStats = useMemo(
+    () => calculateMissedStats(executedLiveForAdherence, dashboardMissedTrades),
+    [executedLiveForAdherence, dashboardMissedTrades],
   );
 
   const applySearchAndSubFilters = (
@@ -606,7 +671,9 @@ export function App() {
     let existingPool: TradeRecord[] =
       importCategory === 'backtest'
         ? [...backtestTrades]
-        : [...liveTrades, ...missedTrades];
+        : importCategory === 'missed'
+          ? [...missedTrades]
+          : [...liveTrades, ...missedTrades];
 
     if (firebaseUser) {
       try {
@@ -614,7 +681,9 @@ export function App() {
         const dbPool =
           importCategory === 'backtest'
             ? dbTrades.filter((tr) => tr.category === 'backtest')
-            : dbTrades.filter((tr) => tr.category !== 'backtest');
+            : importCategory === 'missed'
+              ? dbTrades.filter((tr) => tr.category === 'missed')
+              : dbTrades.filter((tr) => tr.category !== 'backtest');
         const byId = new Map<string, TradeRecord>();
         dbPool.forEach((tr) => byId.set(tr.id, tr));
         existingPool.forEach((tr) => byId.set(tr.id, tr));
@@ -630,23 +699,12 @@ export function App() {
       imported,
     );
 
-    const missedIncoming = addedTrades.filter((tr) => tr.category === 'missed');
-    const primaryIncoming = addedTrades.filter((tr) => tr.category !== 'missed');
     const tradesToSyncCloud: TradeRecord[] = [];
+    let missedIncomingCount = 0;
 
-    if (primaryIncoming.length > 0) {
-      if (importCategory === 'backtest') {
-        const next = [...backtestTrades, ...primaryIncoming];
-        setBacktestTrades(next);
-        saveTradesSafely('backtest', next);
-        tradesToSyncCloud.push(...primaryIncoming);
-      } else if (importCategory === 'live') {
-        const next = [...liveTrades, ...primaryIncoming];
-        setLiveTrades(next);
-        saveTradesSafely('live', next);
-        tradesToSyncCloud.push(...primaryIncoming);
-      } else {
-        const normalizedMissed = primaryIncoming.map((t) => ({
+    if (addedTrades.length > 0) {
+      if (importCategory === 'missed') {
+        const normalizedMissed = addedTrades.map((t) => ({
           ...t,
           category: 'missed' as const,
           isMissed: true,
@@ -655,14 +713,30 @@ export function App() {
         setMissedTrades(next);
         saveTradesSafely('missed', next);
         tradesToSyncCloud.push(...normalizedMissed);
-      }
-    }
+        missedIncomingCount = normalizedMissed.length;
+      } else if (importCategory === 'backtest') {
+        const next = [...backtestTrades, ...addedTrades];
+        setBacktestTrades(next);
+        saveTradesSafely('backtest', next);
+        tradesToSyncCloud.push(...addedTrades);
+      } else {
+        const missedIncoming = addedTrades.filter((tr) => tr.category === 'missed');
+        const primaryIncoming = addedTrades.filter((tr) => tr.category !== 'missed');
 
-    if (missedIncoming.length > 0 && importCategory !== 'missed') {
-      const nextMissed = [...missedTrades, ...missedIncoming];
-      setMissedTrades(nextMissed);
-      saveTradesSafely('missed', nextMissed);
-      tradesToSyncCloud.push(...missedIncoming);
+        if (primaryIncoming.length > 0) {
+          const next = [...liveTrades, ...primaryIncoming];
+          setLiveTrades(next);
+          saveTradesSafely('live', next);
+          tradesToSyncCloud.push(...primaryIncoming);
+        }
+        if (missedIncoming.length > 0) {
+          const nextMissed = [...missedTrades, ...missedIncoming];
+          setMissedTrades(nextMissed);
+          saveTradesSafely('missed', nextMissed);
+          tradesToSyncCloud.push(...missedIncoming);
+          missedIncomingCount = missedIncoming.length;
+        }
+      }
     }
 
     if (firebaseUser && tradesToSyncCloud.length > 0) {
@@ -689,7 +763,8 @@ export function App() {
     const taggedBacktestMissed = addedTrades.filter(
       (tr) => tr.category === 'backtest' && tr.isMissed,
     ).length;
-    const totalTaggedMissed = missedIncoming.length + taggedBacktestMissed;
+    const totalTaggedMissed =
+      importCategory === 'missed' ? 0 : missedIncomingCount + taggedBacktestMissed;
     const missedNote =
       totalTaggedMissed > 0
         ? ` · ${totalTaggedMissed} UNFILLED/NON PRESO`
@@ -729,6 +804,7 @@ export function App() {
     source: GoogleSheetSource,
     btPool: TradeRecord[],
     livePool: TradeRecord[],
+    missedPool: TradeRecord[],
   ): Promise<{
     outcome: AssetSyncOutcome;
     addedBt: TradeRecord[];
@@ -736,7 +812,12 @@ export function App() {
     addedMissed: TradeRecord[];
   }> => {
     const fetched = await fetchAndParseGoogleSheetTrades(source);
-    const targetPool = source.category === 'backtest' ? btPool : livePool;
+    const targetPool =
+      source.category === 'backtest'
+        ? btPool
+        : source.category === 'missed'
+          ? missedPool
+          : livePool;
 
     const { addedTrades, skippedDuplicates } = deduplicateImportedTrades(
       targetPool,
@@ -749,12 +830,23 @@ export function App() {
     const addedMissed: TradeRecord[] = [];
 
     addedTrades.forEach((tr) => {
-      targetPool.push(tr);
       if (source.category === 'backtest') {
+        targetPool.push(tr);
         addedBt.push(tr);
+      } else if (source.category === 'missed') {
+        const normalizedMissed: TradeRecord = {
+          ...tr,
+          category: 'missed',
+          isMissed: true,
+        };
+        targetPool.push(normalizedMissed);
+        addedMissed.push(normalizedMissed);
       } else if (tr.category === 'missed') {
+        targetPool.push(tr);
+        missedPool.push(tr);
         addedMissed.push(tr);
       } else {
+        targetPool.push(tr);
         addedLive.push(tr);
       }
     });
@@ -808,20 +900,28 @@ export function App() {
   ): Promise<AssetSyncOutcome> => {
     const btPool = [...backtestTrades];
     const livePool = [...liveTrades, ...missedTrades];
+    const missedPool = [...missedTrades];
 
     if (firebaseUser) {
       try {
         const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
         const byIdBt = new Map<string, TradeRecord>();
         const byIdLv = new Map<string, TradeRecord>();
+        const byIdMissed = new Map<string, TradeRecord>();
         dbTrades.forEach((tr) => {
-          if (tr.category === 'backtest') byIdBt.set(tr.id, tr);
-          else byIdLv.set(tr.id, tr);
+          if (tr.category === 'backtest') {
+            byIdBt.set(tr.id, tr);
+          } else {
+            byIdLv.set(tr.id, tr);
+            if (tr.category === 'missed') byIdMissed.set(tr.id, tr);
+          }
         });
         btPool.forEach((tr) => byIdBt.set(tr.id, tr));
         livePool.forEach((tr) => byIdLv.set(tr.id, tr));
+        missedPool.forEach((tr) => byIdMissed.set(tr.id, tr));
         btPool.splice(0, btPool.length, ...byIdBt.values());
         livePool.splice(0, livePool.length, ...byIdLv.values());
+        missedPool.splice(0, missedPool.length, ...byIdMissed.values());
       } catch (err) {
         const message =
           err instanceof Error ? err.message : 'Errore di lettura da Firebase.';
@@ -839,7 +939,7 @@ export function App() {
 
     try {
       const { outcome, addedBt, addedLive, addedMissed } =
-        await runGoogleSheetSyncForSource(source, btPool, livePool);
+        await runGoogleSheetSyncForSource(source, btPool, livePool, missedPool);
 
       const appendUniqueById = (prev: TradeRecord[], incoming: TradeRecord[]) => {
         const map = new Map<string, TradeRecord>();
@@ -893,20 +993,28 @@ export function App() {
   ): Promise<AssetSyncOutcome[]> => {
     const btPool = [...backtestTrades];
     const livePool = [...liveTrades, ...missedTrades];
+    const missedPool = [...missedTrades];
 
     if (firebaseUser) {
       try {
         const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
         const byIdBt = new Map<string, TradeRecord>();
         const byIdLv = new Map<string, TradeRecord>();
+        const byIdMissed = new Map<string, TradeRecord>();
         dbTrades.forEach((tr) => {
-          if (tr.category === 'backtest') byIdBt.set(tr.id, tr);
-          else byIdLv.set(tr.id, tr);
+          if (tr.category === 'backtest') {
+            byIdBt.set(tr.id, tr);
+          } else {
+            byIdLv.set(tr.id, tr);
+            if (tr.category === 'missed') byIdMissed.set(tr.id, tr);
+          }
         });
         btPool.forEach((tr) => byIdBt.set(tr.id, tr));
         livePool.forEach((tr) => byIdLv.set(tr.id, tr));
+        missedPool.forEach((tr) => byIdMissed.set(tr.id, tr));
         btPool.splice(0, btPool.length, ...byIdBt.values());
         livePool.splice(0, livePool.length, ...byIdLv.values());
+        missedPool.splice(0, missedPool.length, ...byIdMissed.values());
       } catch (err) {
         setFatalError(err instanceof Error ? err : new Error(String(err)));
         return [];
@@ -922,7 +1030,7 @@ export function App() {
       const src = googleSheets[i];
       onProgress?.(i + 1, googleSheets.length, src.asset);
       try {
-        const res = await runGoogleSheetSyncForSource(src, btPool, livePool);
+        const res = await runGoogleSheetSyncForSource(src, btPool, livePool, missedPool);
         outcomes.push(res.outcome);
         allAddedBt.push(...res.addedBt);
         allAddedLive.push(...res.addedLive);
@@ -1449,7 +1557,10 @@ export function App() {
     }));
   };
 
-  const executionDeltaR = roundTo(liveStats.netR - backtestStats.netR, 2);
+  const dashboardExecutionDeltaR = roundTo(
+    liveStats.netR - dashboardBacktestStats.netR,
+    2,
+  );
 
   if (!authReady) {
     return (
@@ -1615,7 +1726,10 @@ export function App() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
-            {activeTab === 'dashboard' || activeTab === 'backtest' || activeTab === 'live' ? (
+            {activeTab === 'dashboard' ||
+            activeTab === 'backtest' ||
+            activeTab === 'live' ||
+            activeTab === 'missed' ? (
               <button
                 type="button"
                 onClick={() => setGoogleSheetsModalOpen(true)}
@@ -1631,11 +1745,19 @@ export function App() {
               </button>
             ) : null}
 
-            {activeTab === 'backtest' || activeTab === 'live' ? (
+            {activeTab === 'backtest' ||
+            activeTab === 'live' ||
+            activeTab === 'missed' ? (
               <button
                 type="button"
                 onClick={() => {
-                  setImportCategory(activeTab === 'backtest' ? 'backtest' : 'live');
+                  setImportCategory(
+                    activeTab === 'backtest'
+                      ? 'backtest'
+                      : activeTab === 'missed'
+                        ? 'missed'
+                        : 'live',
+                  );
                   setImportModalOpen(true);
                 }}
                 className="inline-flex items-center gap-2 rounded-md border border-sky-500/40 bg-sky-500/10 px-3.5 py-2 text-xs font-semibold text-sky-300 transition-colors hover:bg-sky-500/20 whitespace-nowrap shrink-0"
@@ -1857,29 +1979,93 @@ export function App() {
 
             {/* Comparison KPI Strip */}
             <section className="space-y-3">
-              <div>
-                <h1 className="text-lg font-semibold text-slate-100">
-                  {t.dashboard.heading}
-                </h1>
-                <p className="mt-0.5 text-xs text-slate-400">
-                  {t.dashboard.subheading}
-                </p>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h1 className="text-lg font-semibold text-slate-100">
+                    {t.dashboard.heading}
+                  </h1>
+                  <p className="mt-0.5 text-xs text-slate-400">
+                    {t.dashboard.subheading}
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <div
+                    role="group"
+                    aria-label="Periodo confronto Dashboard"
+                    className="inline-flex flex-wrap items-center rounded-lg border border-[#1E2634] bg-[#0B0E14] p-1 text-xs"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setDashboardRangeMode('live_period')}
+                      className={`rounded-md px-3 py-1.5 font-medium transition-colors whitespace-nowrap ${
+                        dashboardRangeMode === 'live_period'
+                          ? 'bg-sky-600 text-white shadow-xs'
+                          : 'text-slate-400 hover:text-slate-100'
+                      }`}
+                    >
+                      {lang === 'en'
+                        ? 'Live Period (from first live trade)'
+                        : lang === 'es'
+                          ? 'Período Live (desde primer trade real)'
+                          : 'Periodo Live (dal primo trade reale)'}
+                      {liveStartDate ? (
+                        <span
+                          className={`ml-1.5 font-mono text-[11px] ${
+                            dashboardRangeMode === 'live_period'
+                              ? 'text-sky-100'
+                              : 'text-slate-500'
+                          }`}
+                        >
+                          · {formatDisplayDate(liveStartDate)}
+                        </span>
+                      ) : null}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDashboardRangeMode('all_backtest')}
+                      className={`rounded-md px-3 py-1.5 font-medium transition-colors whitespace-nowrap ${
+                        dashboardRangeMode === 'all_backtest'
+                          ? 'bg-sky-600 text-white shadow-xs'
+                          : 'text-slate-400 hover:text-slate-100'
+                      }`}
+                    >
+                      {lang === 'en'
+                        ? 'Full Backtest History'
+                        : lang === 'es'
+                          ? 'Todo el Histórico Backtest'
+                          : 'Tutto lo Storico Backtest'}
+                    </button>
+                  </div>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="rounded-lg border border-[#1E2634] bg-[#121721] p-5">
-                  <div className="text-xs font-medium text-slate-400">
-                    {t.dashboard.backtestNetR}
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-slate-400">
+                      {t.dashboard.backtestNetR}
+                    </span>
+                    {isLiveAligned && liveStartDate ? (
+                      <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">
+                        ≥ {formatDisplayDate(liveStartDate)}
+                      </span>
+                    ) : null}
                   </div>
                   <div
                     className={`mt-2 font-mono text-2xl font-bold tabular-nums ${
-                      backtestStats.netR >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                      dashboardBacktestStats.netR >= 0 ? 'text-emerald-400' : 'text-rose-400'
                     }`}
                   >
-                    {formatR(backtestStats.netR)}
+                    {formatR(dashboardBacktestStats.netR)}
                   </div>
                   <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
-                    {backtestStats.totalTrades} trades · {backtestStats.winRatePct.toFixed(1)}% WR
+                    {dashboardBacktestStats.totalTrades} trades ·{' '}
+                    {dashboardBacktestStats.winRatePct.toFixed(1)}% WR
+                  </div>
+                  <div className="mt-1 font-mono text-[11px] text-slate-500 tabular-nums">
+                    {dashboardBacktestStats.wins} TP · {dashboardBacktestStats.losses} SL ·{' '}
+                    {dashboardBacktestStats.breakevens} BE · {dashboardBacktestStats.unfilled} UF
                   </div>
                 </div>
 
@@ -1897,6 +2083,10 @@ export function App() {
                   <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
                     {liveStats.totalTrades} trades · {liveStats.winRatePct.toFixed(1)}% WR
                   </div>
+                  <div className="mt-1 font-mono text-[11px] text-slate-500 tabular-nums">
+                    {liveStats.wins} TP · {liveStats.losses} SL ·{' '}
+                    {liveStats.breakevens} BE · {liveStats.unfilled} UF
+                  </div>
                 </div>
 
                 <div className="rounded-lg border border-[#1E2634] bg-[#121721] p-5">
@@ -1905,13 +2095,13 @@ export function App() {
                   </div>
                   <div
                     className={`mt-2 font-mono text-2xl font-bold tabular-nums ${
-                      executionDeltaR >= 0 ? 'text-emerald-400' : 'text-amber-400'
+                      dashboardExecutionDeltaR >= 0 ? 'text-emerald-400' : 'text-amber-400'
                     }`}
                   >
-                    {formatR(executionDeltaR)}
+                    {formatR(dashboardExecutionDeltaR)}
                   </div>
                   <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
-                    {t.dashboard.missedCol}: {formatR(missedStats.theoreticalNetR)}
+                    {t.dashboard.missedCol}: {formatR(dashboardMissedStats.theoreticalNetR)}
                   </div>
                 </div>
 
@@ -1921,34 +2111,40 @@ export function App() {
                   </div>
                   <div
                     className={`mt-2 font-mono text-2xl font-bold tabular-nums ${
-                      missedStats.totalSignals === 0
+                      dashboardMissedStats.totalSignals === 0
                         ? 'text-slate-300'
-                        : missedStats.adherenceScorePct >= 80
+                        : dashboardMissedStats.adherenceScorePct >= 80
                           ? 'text-emerald-400'
-                          : missedStats.adherenceScorePct >= 60
+                          : dashboardMissedStats.adherenceScorePct >= 60
                             ? 'text-amber-400'
                             : 'text-rose-400'
                     }`}
                   >
-                    {missedStats.adherenceScorePct.toFixed(1)}%
+                    {dashboardMissedStats.adherenceScorePct.toFixed(1)}%
                   </div>
                   <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
-                    {missedStats.executedCount} {t.common.executedSuffix} ·{' '}
-                    {missedStats.totalMissed} {t.common.missedSuffix}
+                    {dashboardMissedStats.executedCount} {t.common.executedSuffix} ·{' '}
+                    {dashboardMissedStats.totalMissed} {t.common.missedSuffix}
                   </div>
                 </div>
               </div>
             </section>
 
-            {/* Dual Equity Curve */}
+            {/* Dual Date-Aligned Equity Curve */}
             <EquityChart
               title={t.dashboard.equityTitle}
-              subtitle={t.dashboard.equitySubtitle}
+              subtitle={
+                isLiveAligned && liveStartDate
+                  ? `${t.dashboard.equitySubtitle} · Timeline allineata dal ${formatDisplayDate(liveStartDate)}`
+                  : `${t.dashboard.equitySubtitle} · Timeline cronologica condivisa`
+              }
               emptyMessage={t.dashboard.noEquityData}
+              xAxisMode="date"
+              dateRangeStart={isLiveAligned && liveStartDate ? liveStartDate : undefined}
               primarySeries={{
                 label: t.dashboard.backtestSeries,
                 color: '#10B981',
-                stats: backtestStats,
+                stats: dashboardBacktestStats,
               }}
               secondarySeries={{
                 label: t.dashboard.liveSeries,
@@ -1959,10 +2155,19 @@ export function App() {
 
             {/* Comparison Matrix Table */}
             <section className="overflow-hidden rounded-lg border border-[#1E2634] bg-[#121721]">
-              <div className="border-b border-[#1E2634] px-5 py-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#1E2634] px-5 py-3.5">
                 <h3 className="text-sm font-semibold text-slate-100">
                   {t.dashboard.comparisonTableTitle}
                 </h3>
+                {isLiveAligned && liveStartDate ? (
+                  <span className="font-mono text-[11px] text-emerald-300/90">
+                    {lang === 'en'
+                      ? `Aligned from ${formatDisplayDate(liveStartDate)}`
+                      : lang === 'es'
+                        ? `Alineado desde ${formatDisplayDate(liveStartDate)}`
+                        : `Allineato dal ${formatDisplayDate(liveStartDate)}`}
+                  </span>
+                ) : null}
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full border-collapse text-left text-xs">
@@ -1980,13 +2185,27 @@ export function App() {
                         {t.dashboard.tradesCount}
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        {backtestStats.totalTrades}
+                        <div>{dashboardBacktestStats.totalTrades}</div>
+                        <div className="mt-0.5 text-[10px] text-slate-400">
+                          {dashboardBacktestStats.wins} TP · {dashboardBacktestStats.losses} SL ·{' '}
+                          {dashboardBacktestStats.breakevens} BE · {dashboardBacktestStats.unfilled} UF
+                        </div>
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        {liveStats.totalTrades}
+                        <div>{liveStats.totalTrades}</div>
+                        <div className="mt-0.5 text-[10px] text-slate-400">
+                          {liveStats.wins} TP · {liveStats.losses} SL ·{' '}
+                          {liveStats.breakevens} BE · {liveStats.unfilled} UF
+                        </div>
                       </td>
                       <td className="px-5 py-3 text-right text-amber-300">
-                        {missedStats.totalMissed}
+                        <div>{dashboardMissedStats.totalMissed}</div>
+                        <div className="mt-0.5 text-[10px] text-slate-400">
+                          {dashboardMissedStats.theoreticalWins} TP ·{' '}
+                          {dashboardMissedStats.avoidedLosses} SL ·{' '}
+                          {dashboardMissedStats.theoreticalBE} BE ·{' '}
+                          {dashboardMissedStats.theoreticalUnfilled} UF
+                        </div>
                       </td>
                     </tr>
                     <tr>
@@ -1994,15 +2213,13 @@ export function App() {
                         {t.dashboard.winRate}
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        {backtestStats.winRatePct.toFixed(1)}%
+                        {dashboardBacktestStats.winRatePct.toFixed(1)}%
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
                         {liveStats.winRatePct.toFixed(1)}%
                       </td>
                       <td className="px-5 py-3 text-right text-slate-400">
-                        {missedStats.totalMissed > 0
-                          ? `${((missedStats.theoreticalWins / missedStats.totalMissed) * 100).toFixed(1)}%`
-                          : '0.0%'}
+                        {dashboardMissedStats.theoreticalWinRatePct.toFixed(1)}%
                       </td>
                     </tr>
                     <tr>
@@ -2010,13 +2227,13 @@ export function App() {
                         {t.journal.netRR}
                       </td>
                       <td className="px-5 py-3 text-right font-semibold text-emerald-400">
-                        {formatR(backtestStats.netR)}
+                        {formatR(dashboardBacktestStats.netR)}
                       </td>
                       <td className="px-5 py-3 text-right font-semibold text-sky-400">
                         {formatR(liveStats.netR)}
                       </td>
                       <td className="px-5 py-3 text-right font-semibold text-amber-400">
-                        {formatR(missedStats.theoreticalNetR)}
+                        {formatR(dashboardMissedStats.theoreticalNetR)}
                       </td>
                     </tr>
                     <tr>
@@ -2024,7 +2241,7 @@ export function App() {
                         {t.dashboard.expectancy}
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        {formatR(backtestStats.expectancyR)}
+                        {formatR(dashboardBacktestStats.expectancyR)}
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
                         {formatR(liveStats.expectancyR)}
@@ -2036,7 +2253,7 @@ export function App() {
                         {t.dashboard.maxDrawdown}
                       </td>
                       <td className="px-5 py-3 text-right text-rose-400">
-                        -{backtestStats.maxDrawdownR.toFixed(2)} R
+                        -{dashboardBacktestStats.maxDrawdownR.toFixed(2)} R
                       </td>
                       <td className="px-5 py-3 text-right text-rose-400">
                         -{liveStats.maxDrawdownR.toFixed(2)} R
@@ -2048,7 +2265,9 @@ export function App() {
                         {t.dashboard.profitFactor}
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        {backtestStats.profitFactorInfinite ? 'Max' : backtestStats.profitFactor.toFixed(2)}
+                        {dashboardBacktestStats.profitFactorInfinite
+                          ? 'Max'
+                          : dashboardBacktestStats.profitFactor.toFixed(2)}
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
                         {liveStats.profitFactorInfinite ? 'Max' : liveStats.profitFactor.toFixed(2)}
@@ -2060,7 +2279,9 @@ export function App() {
                         Payoff Ratio (R:R)
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        {backtestStats.payoffRatio === null ? 'Max' : `${backtestStats.payoffRatio.toFixed(2)} : 1`}
+                        {dashboardBacktestStats.payoffRatio === null
+                          ? 'Max'
+                          : `${dashboardBacktestStats.payoffRatio.toFixed(2)} : 1`}
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
                         {liveStats.payoffRatio === null ? 'Max' : `${liveStats.payoffRatio.toFixed(2)} : 1`}
@@ -2072,11 +2293,14 @@ export function App() {
                         Sharpe Ratio / Sortino Ratio
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        {backtestStats.sharpeRatio !== null ? backtestStats.sharpeRatio.toFixed(2) : '0.00'} /{' '}
-                        {backtestStats.sortinoInfinite
+                        {dashboardBacktestStats.sharpeRatio !== null
+                          ? dashboardBacktestStats.sharpeRatio.toFixed(2)
+                          : '0.00'}{' '}
+                        /{' '}
+                        {dashboardBacktestStats.sortinoInfinite
                           ? 'Max'
-                          : backtestStats.sortinoRatio !== null
-                            ? backtestStats.sortinoRatio.toFixed(2)
+                          : dashboardBacktestStats.sortinoRatio !== null
+                            ? dashboardBacktestStats.sortinoRatio.toFixed(2)
                             : '0.00'}
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
@@ -2094,8 +2318,13 @@ export function App() {
                         Calmar / Recovery Factor
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        {backtestStats.calmarRatio !== null ? backtestStats.calmarRatio.toFixed(2) : 'N/A'} /{' '}
-                        {backtestStats.recoveryFactor !== null ? backtestStats.recoveryFactor.toFixed(2) : 'Max'}
+                        {dashboardBacktestStats.calmarRatio !== null
+                          ? dashboardBacktestStats.calmarRatio.toFixed(2)
+                          : 'N/A'}{' '}
+                        /{' '}
+                        {dashboardBacktestStats.recoveryFactor !== null
+                          ? dashboardBacktestStats.recoveryFactor.toFixed(2)
+                          : 'Max'}
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
                         {liveStats.calmarRatio !== null ? liveStats.calmarRatio.toFixed(2) : 'N/A'} /{' '}
@@ -2108,7 +2337,7 @@ export function App() {
                         Risk of Ruin (20R)
                       </td>
                       <td className="px-5 py-3 text-right text-emerald-400">
-                        {backtestStats.riskOfRuinPct.toFixed(2)}%
+                        {dashboardBacktestStats.riskOfRuinPct.toFixed(2)}%
                       </td>
                       <td className="px-5 py-3 text-right text-sky-400">
                         {liveStats.riskOfRuinPct.toFixed(2)}%
@@ -2122,7 +2351,7 @@ export function App() {
 
             {/* Institutional Analytics Summary for Backtest */}
             <InstitutionalMetricsPanel
-              stats={backtestStats}
+              stats={dashboardBacktestStats}
               lang={lang}
               titlePrefix={t.nav.backtest}
             />
@@ -2149,9 +2378,16 @@ export function App() {
                 <div className="mt-2 font-mono text-2xl font-bold text-slate-100 tabular-nums">
                   {backtestStats.totalTrades}
                 </div>
-                <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
-                  {backtestStats.wins} TP · {backtestStats.losses} SL ·{' '}
-                  {backtestStats.breakevens} BE
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 font-mono text-xs text-slate-400 tabular-nums">
+                  <span>{backtestStats.wins} TP</span>
+                  <span>·</span>
+                  <span>{backtestStats.losses} SL</span>
+                  <span>·</span>
+                  <span>{backtestStats.breakevens} BE</span>
+                  <span>·</span>
+                  <span className="rounded bg-slate-800/80 px-1.5 py-0.5 text-slate-300">
+                    {backtestStats.unfilled} UF
+                  </span>
                 </div>
               </div>
               <div className="rounded-lg border border-[#1E2634] bg-[#121721] p-5">
@@ -2281,8 +2517,16 @@ export function App() {
                 <div className="mt-2 font-mono text-2xl font-bold text-slate-100 tabular-nums">
                   {liveStats.totalTrades}
                 </div>
-                <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
-                  {liveStats.wins} TP · {liveStats.losses} SL · {liveStats.breakevens} BE
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 font-mono text-xs text-slate-400 tabular-nums">
+                  <span>{liveStats.wins} TP</span>
+                  <span>·</span>
+                  <span>{liveStats.losses} SL</span>
+                  <span>·</span>
+                  <span>{liveStats.breakevens} BE</span>
+                  <span>·</span>
+                  <span className="rounded bg-slate-800/80 px-1.5 py-0.5 text-slate-300">
+                    {liveStats.unfilled} UF
+                  </span>
                 </div>
               </div>
               <div className="rounded-lg border border-[#1E2634] bg-[#121721] p-5">
@@ -2412,9 +2656,16 @@ export function App() {
                 <div className="mt-2 font-mono text-2xl font-bold text-amber-400 tabular-nums">
                   {missedStats.totalMissed}
                 </div>
-                <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
-                  {missedStats.theoreticalWins} TP · {missedStats.avoidedLosses} SL ·{' '}
-                  {missedStats.theoreticalBE} BE
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 font-mono text-xs text-slate-400 tabular-nums">
+                  <span>{missedStats.theoreticalWins} TP</span>
+                  <span>·</span>
+                  <span>{missedStats.avoidedLosses} SL</span>
+                  <span>·</span>
+                  <span>{missedStats.theoreticalBE} BE</span>
+                  <span>·</span>
+                  <span className="rounded bg-slate-800/80 px-1.5 py-0.5 text-slate-300">
+                    {missedStats.theoreticalUnfilled} UF
+                  </span>
                 </div>
               </div>
 
@@ -2635,7 +2886,9 @@ export function App() {
         existingTrades={
           importCategory === 'backtest'
             ? backtestTrades
-            : [...liveTrades, ...missedTrades]
+            : importCategory === 'missed'
+              ? missedTrades
+              : [...liveTrades, ...missedTrades]
         }
         t={t}
         onClose={() => setImportModalOpen(false)}
@@ -2645,7 +2898,13 @@ export function App() {
       <GoogleSheetsSyncModal
         isOpen={googleSheetsModalOpen}
         lang={lang}
-        defaultCategory={activeTab === 'live' ? 'live' : 'backtest'}
+        defaultCategory={
+          activeTab === 'live'
+            ? 'live'
+            : activeTab === 'missed'
+              ? 'missed'
+              : 'backtest'
+        }
         sources={googleSheets}
         knownAssets={availableAssets}
         onClose={() => setGoogleSheetsModalOpen(false)}

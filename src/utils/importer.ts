@@ -1052,8 +1052,7 @@ export function buildTradesFromSheet(
     const bias = biasRaw === 'SHORT' || biasRaw === 'SELL' ? 'SHORT' : 'LONG';
 
     const notesText = String(fieldValues.notes ?? rawRow.NOTE ?? '').trim();
-    const isMissedByRule =
-      outcome === 'UNFILLED' || notesText.toUpperCase().includes('NON PRESO');
+    const isMissedByRule = notesText.toUpperCase().includes('NON PRESO');
 
     const finalCategory: TradeCategory =
       targetCategory === 'backtest'

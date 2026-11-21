@@ -6,6 +6,8 @@ interface EquityChartProps {
   title: string;
   subtitle: string;
   emptyMessage: string;
+  xAxisMode?: 'index' | 'date';
+  dateRangeStart?: string;
   primarySeries: {
     label: string;
     color: string;
@@ -26,10 +28,98 @@ interface TooltipInfo {
   index: number;
 }
 
+interface CoordPoint {
+  index: number;
+  date: string;
+  label: string;
+  deltaR: number;
+  cumulativeR: number;
+  drawdownR: number;
+  trade: TradeRecord | null;
+  x: number;
+  y: number;
+}
+
+const DAY_MS = 86_400_000;
+
+function parseIsoDayMs(isoDate: string | undefined): number | null {
+  if (!isoDate) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate.trim());
+  if (!m) return null;
+  const ms = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function parseTimeOffsetMs(entryTime: string | undefined): number | null {
+  if (!entryTime) return null;
+  const m = /^(\d{1,2}):(\d{2})/.exec(entryTime.trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+  return (h * 60 + min) * 60_000;
+}
+
+function formatAxisDateLabel(ms: number): string {
+  const dt = new Date(ms);
+  const dd = String(dt.getUTCDate()).padStart(2, '0');
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const yy = String(dt.getUTCFullYear()).slice(-2);
+  return `${dd}/${mm}/${yy}`;
+}
+
+function computeSeriesTimestamps(
+  pts: PerformanceStats['equityPoints'],
+  seriesFloorMs: number | null,
+): number[] {
+  const tradePoints = pts.filter((p) => p.index > 0);
+  const perDayCounts = new Map<string, number>();
+  tradePoints.forEach((p) => {
+    const key = p.trade?.date || p.date || '';
+    if (key) perDayCounts.set(key, (perDayCounts.get(key) ?? 0) + 1);
+  });
+
+  const perDaySeen = new Map<string, number>();
+  let firstTradeDayMs: number | null = null;
+  const tradeTimestamps: (number | null)[] = new Array(pts.length).fill(null);
+
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    if (p.index === 0) continue;
+    const rawDate = p.trade?.date || p.date;
+    const dayMs = parseIsoDayMs(rawDate);
+    if (dayMs === null) continue;
+
+    if (firstTradeDayMs === null || dayMs < firstTradeDayMs) {
+      firstTradeDayMs = dayMs;
+    }
+
+    const totalSameDay = perDayCounts.get(rawDate) ?? 1;
+    const seqOnDay = perDaySeen.get(rawDate) ?? 0;
+    perDaySeen.set(rawDate, seqOnDay + 1);
+
+    const parsedTimeMs = parseTimeOffsetMs(p.trade?.entryTime);
+    const intraDayOffset =
+      parsedTimeMs !== null
+        ? Math.max(60_000, parsedTimeMs + seqOnDay * 1_000)
+        : Math.round(((seqOnDay + 1) / (totalSameDay + 1)) * (DAY_MS - 60_000));
+
+    tradeTimestamps[i] = dayMs + intraDayOffset;
+  }
+
+  const anchorMs = seriesFloorMs ?? firstTradeDayMs ?? Date.now();
+  return pts.map((p, idx) => {
+    if (p.index === 0) return anchorMs;
+    return tradeTimestamps[idx] ?? anchorMs;
+  });
+}
+
 export function EquityChart({
   title,
   subtitle,
   emptyMessage,
+  xAxisMode = 'index',
+  dateRangeStart,
   primarySeries,
   secondarySeries,
 }: EquityChartProps) {
@@ -61,28 +151,94 @@ export function EquityChart({
   const yMax = maxVal + padY;
   const ySpan = yMax - yMin || 1;
 
-  const maxLen = Math.max(pPoints.length, sPoints.length, 2);
-  const xFor = (idx: number, totalLen: number) =>
-    padLeft + (totalLen <= 1 ? plotW / 2 : (idx / (totalLen - 1)) * plotW);
   const yFor = (v: number) => padTop + ((yMax - v) / ySpan) * plotH;
   const zeroY = yFor(0);
-
   const yTicks = [0, 1, 2, 3, 4].map((i) => yMin + (i / 4) * ySpan);
 
-  const buildCoords = (pts: PerformanceStats['equityPoints']) =>
-    pts.map((p, idx) => ({
-      ...p,
-      x: xFor(idx, Math.max(pts.length, maxLen)),
-      y: yFor(p.cumulativeR),
-    }));
+  let pCoords: CoordPoint[] = [];
+  let sCoords: CoordPoint[] = [];
+  let pLinePoints = '';
+  let sLinePoints = '';
+  let dateTicks: { x: number; label: string; anchor: 'start' | 'middle' | 'end' }[] = [];
 
-  const pCoords = buildCoords(pPoints);
-  const sCoords = buildCoords(sPoints);
+  if (xAxisMode === 'date') {
+    const forcedStartMs = parseIsoDayMs(dateRangeStart);
+    const pHasTrades = pPoints.length > 1;
+    const sHasTrades = sPoints.length > 1;
 
-  const buildPolyline = (coords: ReturnType<typeof buildCoords>) =>
-    coords.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
+    const pTimestamps = pHasTrades ? computeSeriesTimestamps(pPoints, forcedStartMs) : [];
+    const sTimestamps = sHasTrades ? computeSeriesTimestamps(sPoints, forcedStartMs) : [];
+    const combinedTimestamps = [...pTimestamps, ...sTimestamps];
 
-  const buildAreaPath = (coords: ReturnType<typeof buildCoords>) => {
+    const minTsRaw =
+      combinedTimestamps.length > 0 ? Math.min(...combinedTimestamps) : Date.now();
+    const startMs =
+      forcedStartMs !== null ? Math.min(forcedStartMs, minTsRaw) : minTsRaw;
+    const maxTsRaw =
+      combinedTimestamps.length > 0 ? Math.max(...combinedTimestamps) : startMs + DAY_MS;
+    const endMs = maxTsRaw <= startMs ? startMs + DAY_MS : maxTsRaw;
+    const spanMs = endMs - startMs || DAY_MS;
+
+    const xForMs = (ms: number) => padLeft + ((ms - startMs) / spanMs) * plotW;
+
+    pCoords = pHasTrades
+      ? pPoints.map((p, idx) => ({
+          ...p,
+          x: xForMs(pTimestamps[idx]),
+          y: yFor(p.cumulativeR),
+        }))
+      : [];
+
+    sCoords = sHasTrades
+      ? sPoints.map((p, idx) => ({
+          ...p,
+          x: xForMs(sTimestamps[idx]),
+          y: yFor(p.cumulativeR),
+        }))
+      : [];
+
+    const buildExtendedLine = (coords: CoordPoint[]) => {
+      if (coords.length < 2) return '';
+      const last = coords[coords.length - 1];
+      const base = coords.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`);
+      const endX = xForMs(endMs);
+      if (endX - last.x > 0.5) {
+        base.push(`${endX.toFixed(1)},${last.y.toFixed(1)}`);
+      }
+      return base.join(' ');
+    };
+
+    pLinePoints = buildExtendedLine(pCoords);
+    sLinePoints = buildExtendedLine(sCoords);
+
+    const tickFractions = [0, 0.25, 0.5, 0.75, 1];
+    dateTicks = tickFractions.map((frac, idx) => {
+      const ms = startMs + frac * spanMs;
+      return {
+        x: xForMs(ms),
+        label: formatAxisDateLabel(ms),
+        anchor: idx === 0 ? 'start' : idx === tickFractions.length - 1 ? 'end' : 'middle',
+      };
+    });
+  } else {
+    const maxLen = Math.max(pPoints.length, sPoints.length, 2);
+    const xFor = (idx: number, totalLen: number) =>
+      padLeft + (totalLen <= 1 ? plotW / 2 : (idx / (totalLen - 1)) * plotW);
+
+    const buildCoords = (pts: PerformanceStats['equityPoints']) =>
+      pts.map((p, idx) => ({
+        ...p,
+        x: xFor(idx, Math.max(pts.length, maxLen)),
+        y: yFor(p.cumulativeR),
+      }));
+
+    pCoords = buildCoords(pPoints);
+    sCoords = buildCoords(sPoints);
+    pLinePoints = pCoords.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
+    sLinePoints = sCoords.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
+  }
+
+  const buildAreaPath = (coords: CoordPoint[]) => {
     if (coords.length < 2) return '';
     return (
       `M ${coords[0].x.toFixed(1)},${zeroY.toFixed(1)} ` +
@@ -173,6 +329,21 @@ export function EquityChart({
               );
             })}
 
+            {xAxisMode === 'date'
+              ? dateTicks.map((tick, idx) => (
+                  <line
+                    key={`xgrid_${idx}`}
+                    x1={tick.x}
+                    y1={padTop}
+                    x2={tick.x}
+                    y2={height - padBottom}
+                    stroke="#1E2634"
+                    strokeWidth={1}
+                    strokeDasharray="2 4"
+                  />
+                ))
+              : null}
+
             <line
               x1={padLeft}
               y1={zeroY}
@@ -201,7 +372,7 @@ export function EquityChart({
                   strokeWidth={2.4}
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  points={buildPolyline(pCoords)}
+                  points={pLinePoints}
                 />
                 {pCoords.map((c) => (
                   <circle
@@ -236,7 +407,7 @@ export function EquityChart({
                   strokeWidth={2.4}
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  points={buildPolyline(sCoords)}
+                  points={sLinePoints}
                 />
                 {sCoords.map((c) => (
                   <circle
@@ -263,26 +434,44 @@ export function EquityChart({
               </>
             ) : null}
 
-            <text
-              x={padLeft}
-              y={height - 10}
-              textAnchor="start"
-              fill="#94A3B8"
-              fontSize={11}
-              fontFamily="JetBrains Mono, monospace"
-            >
-              #0
-            </text>
-            <text
-              x={width - padRight}
-              y={height - 10}
-              textAnchor="end"
-              fill="#94A3B8"
-              fontSize={11}
-              fontFamily="JetBrains Mono, monospace"
-            >
-              #{Math.max(pPoints.length - 1, sPoints.length - 1)}
-            </text>
+            {xAxisMode === 'date' ? (
+              dateTicks.map((tick, idx) => (
+                <text
+                  key={`xlbl_${idx}`}
+                  x={tick.x}
+                  y={height - 10}
+                  textAnchor={tick.anchor}
+                  fill="#94A3B8"
+                  fontSize={11}
+                  fontFamily="JetBrains Mono, monospace"
+                >
+                  {tick.label}
+                </text>
+              ))
+            ) : (
+              <>
+                <text
+                  x={padLeft}
+                  y={height - 10}
+                  textAnchor="start"
+                  fill="#94A3B8"
+                  fontSize={11}
+                  fontFamily="JetBrains Mono, monospace"
+                >
+                  #0
+                </text>
+                <text
+                  x={width - padRight}
+                  y={height - 10}
+                  textAnchor="end"
+                  fill="#94A3B8"
+                  fontSize={11}
+                  fontFamily="JetBrains Mono, monospace"
+                >
+                  #{Math.max(pPoints.length - 1, sPoints.length - 1)}
+                </text>
+              </>
+            )}
           </svg>
 
           {hovered ? (
@@ -305,6 +494,9 @@ export function EquityChart({
                 </>
               ) : (
                 <div className="mt-0.5 text-slate-300">
+                  {xAxisMode === 'date' && dateRangeStart
+                    ? `${formatDisplayDate(dateRangeStart)} · `
+                    : ''}
                   {formatR(hovered.cumulativeR)}
                 </div>
               )}

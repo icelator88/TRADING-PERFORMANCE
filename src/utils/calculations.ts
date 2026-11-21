@@ -498,6 +498,7 @@ export function calculateMissedStats(
   let theoreticalWins = 0;
   let avoidedLosses = 0;
   let theoreticalBE = 0;
+  let theoreticalUnfilled = 0;
   let theoreticalNetR = 0;
   let missedWinR = 0;
   let avoidedLossR = 0;
@@ -517,6 +518,8 @@ export function calculateMissedStats(
     } else if (trade.outcome === 'STOP LOSS') {
       avoidedLosses += 1;
       avoidedLossR = roundTo(avoidedLossR + r, 2);
+    } else if (trade.outcome === 'UNFILLED') {
+      theoreticalUnfilled += 1;
     } else {
       theoreticalBE += 1;
     }
@@ -534,6 +537,11 @@ export function calculateMissedStats(
   const totalSignals = executedCount + totalMissed;
   const adherenceScorePct =
     totalSignals > 0 ? roundTo((executedCount / totalSignals) * 100, 1) : 0;
+  const executedMissedRelevant = theoreticalWins + avoidedLosses + theoreticalBE;
+  const theoreticalWinRatePct =
+    executedMissedRelevant > 0
+      ? roundTo((theoreticalWins / executedMissedRelevant) * 100, 1)
+      : 0;
 
   return {
     totalMissed,
@@ -542,6 +550,8 @@ export function calculateMissedStats(
     theoreticalWins,
     avoidedLosses,
     theoreticalBE,
+    theoreticalUnfilled,
+    theoreticalWinRatePct,
     theoreticalNetR,
     missedWinR,
     avoidedLossR,

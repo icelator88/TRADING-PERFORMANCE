@@ -536,7 +536,12 @@ function docToGoogleSheetSource(
     asset,
     sheetUrl,
     spreadsheetId,
-    category: data.category === 'live' ? 'live' : 'backtest',
+    category:
+      data.category === 'live'
+        ? 'live'
+        : data.category === 'missed'
+          ? 'missed'
+          : 'backtest',
     lastSyncedAt:
       typeof data.lastSyncedAt === 'number' && Number.isFinite(data.lastSyncedAt)
         ? data.lastSyncedAt
@@ -605,8 +610,12 @@ export async function saveGoogleSheetSourceInFirestore(
     .replace(/[^a-zA-Z0-9_\-]/g, '')
     .slice(0, 128);
   const safeUrl = source.sheetUrl.trim().slice(0, 500);
-  const safeCategory: 'backtest' | 'live' =
-    source.category === 'live' ? 'live' : 'backtest';
+  const safeCategory: 'backtest' | 'live' | 'missed' =
+    source.category === 'live'
+      ? 'live'
+      : source.category === 'missed'
+        ? 'missed'
+        : 'backtest';
 
   try {
     await setDoc(ref, {

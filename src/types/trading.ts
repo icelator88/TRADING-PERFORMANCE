@@ -145,6 +145,8 @@ export interface MissedStats {
   theoreticalWins: number;
   avoidedLosses: number;
   theoreticalBE: number;
+  theoreticalUnfilled: number;
+  theoreticalWinRatePct: number;
   theoreticalNetR: number;
   missedWinR: number;
   avoidedLossR: number;
@@ -191,7 +193,7 @@ export interface GoogleSheetSource {
   asset: string;
   sheetUrl: string;
   spreadsheetId: string;
-  category: 'backtest' | 'live';
+  category: TradeCategory;
   lastSyncedAt?: number;
   lastSyncSummary?: string;
   createdAt: number;
