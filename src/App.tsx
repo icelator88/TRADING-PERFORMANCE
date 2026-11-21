@@ -936,21 +936,24 @@ export function App() {
 
   return (
     <div className="min-h-screen bg-[#0B0E14] text-slate-100 flex flex-col">
-      {/* Sticky Top Bar (3-Zone Contract) */}
+      {/* Sticky Top Bar (3-Zone Contract, 2-row responsive on mobile) */}
       <header className="sticky top-0 z-30 border-b border-[#1E2634] bg-[#0B0E14]/95 backdrop-blur-xs">
-        <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-8 px-4 py-3.5 sm:px-6">
+        <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-x-3 gap-y-2.5 px-3 py-3 sm:px-6 lg:flex-nowrap lg:gap-8 lg:py-3.5">
           <a
             href="#dashboard"
             onClick={(e) => {
               e.preventDefault();
               handleTabChange('dashboard');
             }}
-            className="text-lg font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0"
+            className="order-1 text-base font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0 sm:text-lg"
           >
             Performance
           </a>
 
-          <nav aria-label="Primary navigation" className="flex items-center gap-6 overflow-x-auto">
+          <nav
+            aria-label="Primary navigation"
+            className="order-3 flex w-full items-center gap-5 overflow-x-auto border-t border-[#1E2634]/80 pt-2 pb-0.5 lg:order-2 lg:w-auto lg:gap-6 lg:border-t-0 lg:pt-0 lg:pb-0"
+          >
             {(
               [
                 ['dashboard', t.nav.dashboard],
@@ -965,7 +968,7 @@ export function App() {
                   key={tabId}
                   type="button"
                   onClick={() => handleTabChange(tabId)}
-                  className={`border-b-2 py-1.5 text-sm transition-colors whitespace-nowrap shrink-0 ${
+                  className={`border-b-2 py-1.5 text-xs transition-colors whitespace-nowrap shrink-0 sm:text-sm ${
                     active
                       ? 'border-sky-400 font-semibold text-slate-100'
                       : 'border-transparent font-medium text-slate-400 hover:text-slate-100'
@@ -977,8 +980,8 @@ export function App() {
             })}
           </nav>
 
-          <div className="flex items-center gap-2.5 shrink-0">
-            <div className="flex items-center gap-2 rounded-md border border-[#1E2634] bg-[#121721] px-2.5 py-1.5 text-xs">
+          <div className="order-2 flex items-center gap-1.5 shrink-0 sm:gap-2.5 lg:order-3">
+            <div className="flex items-center gap-1.5 rounded-md border border-[#1E2634] bg-[#121721] px-2 py-1 text-xs sm:gap-2 sm:px-2.5 sm:py-1.5">
               <Cloud
                 className={`h-3.5 w-3.5 shrink-0 ${
                   cloudSyncStatus === 'syncing'
@@ -988,7 +991,7 @@ export function App() {
               />
               <span
                 title={firebaseUser.email || firebaseUser.displayName || ''}
-                className="hidden max-w-[160px] truncate font-medium text-slate-200 sm:inline"
+                className="hidden max-w-[160px] truncate font-medium text-slate-200 md:inline"
               >
                 {firebaseUser.email || firebaseUser.displayName || 'Cloud'}
               </span>
@@ -998,7 +1001,7 @@ export function App() {
                 onClick={() => void handleLogout()}
                 title="Logout"
                 aria-label="Logout"
-                className="inline-flex items-center gap-1.5 rounded border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-[11px] font-semibold text-rose-300 transition-colors hover:bg-rose-500/20 disabled:opacity-50"
+                className="inline-flex items-center gap-1 rounded border border-rose-500/30 bg-rose-500/10 px-1.5 py-0.5 text-[11px] font-semibold text-rose-300 transition-colors hover:bg-rose-500/20 disabled:opacity-50 sm:gap-1.5 sm:px-2 sm:py-1"
               >
                 <LogOut className="h-3.5 w-3.5" />
                 <span>Logout</span>
@@ -1015,7 +1018,7 @@ export function App() {
                   key={code}
                   type="button"
                   onClick={() => handleLanguageChange(code)}
-                  className={`rounded px-2 py-1 uppercase transition-colors whitespace-nowrap shrink-0 ${
+                  className={`rounded px-1.5 py-1 uppercase transition-colors whitespace-nowrap shrink-0 sm:px-2 ${
                     lang === code
                       ? 'bg-sky-600 text-white'
                       : 'text-slate-400 hover:text-slate-100'
@@ -1039,7 +1042,7 @@ export function App() {
                 );
                 setTradeModalOpen(true);
               }}
-              className="rounded-md bg-sky-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-sky-500 whitespace-nowrap shrink-0"
+              className="rounded-md bg-sky-600 px-2.5 py-1.5 text-[11px] font-semibold text-white transition-colors hover:bg-sky-500 whitespace-nowrap shrink-0 sm:px-4 sm:py-2 sm:text-xs"
             >
               {t.nav.newTrade}
             </button>
