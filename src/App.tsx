@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Cloud,
   Download,
+  Eraser,
   FileJson,
   FileSpreadsheet,
   LogOut,
@@ -47,6 +48,7 @@ import {
 } from './utils/calculations';
 import {
   batchCreateTradesInFirestore,
+  batchDeleteTradesInFirestore,
   type CloudUserSettings,
   deleteGoogleSheetSourceInFirestore,
   deleteTradeInFirestore,
@@ -63,6 +65,7 @@ import {
 import { analizzaTradeConGemini, buildGeminiReviewPrompt } from './utils/geminiReview';
 import { fetchAndParseGoogleSheetTrades } from './utils/googleSheets';
 import {
+  buildTradeCoreDuplicateKey,
   buildTradeDuplicateKey,
   deduplicateImportedTrades,
   exportBackupJson,
@@ -105,6 +108,7 @@ export function App() {
 
   const [googleSheets, setGoogleSheets] = useState<GoogleSheetSource[]>([]);
   const [googleSheetsModalOpen, setGoogleSheetsModalOpen] = useState(false);
+  const [cleaningDuplicates, setCleaningDuplicates] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState<TradeRecord | null>(null);
   const [clearStorageConfirmOpen, setClearStorageConfirmOpen] = useState(false);
@@ -720,6 +724,7 @@ export function App() {
     const { addedTrades, skippedDuplicates } = deduplicateImportedTrades(
       targetPool,
       fetched.trades,
+      { keyFn: buildTradeCoreDuplicateKey },
     );
 
     const addedBt: TradeRecord[] = [];
@@ -967,6 +972,115 @@ export function App() {
     );
 
     return outcomes;
+  };
+
+  const handleRemoveDuplicates = async () => {
+    if (cleaningDuplicates) return;
+    setCleaningDuplicates(true);
+
+    const targetCategories: TradeCategory[] =
+      activeTab === 'backtest'
+        ? ['backtest']
+        : activeTab === 'live'
+          ? ['live']
+          : activeTab === 'missed'
+            ? ['missed']
+            : ['backtest', 'live', 'missed'];
+
+    const sectionLabel =
+      activeTab === 'backtest'
+        ? 'Backtest'
+        : activeTab === 'live'
+          ? 'Journal Reale'
+          : activeTab === 'missed'
+            ? 'Trade Non Presi'
+            : 'Tutte le sezioni';
+
+    try {
+      let sourceTrades: TradeRecord[] = [
+        ...backtestTrades,
+        ...liveTrades,
+        ...missedTrades,
+      ];
+
+      if (firebaseUser) {
+        sourceTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
+      }
+
+      const duplicateIds: string[] = [];
+      const keptByCategory: Record<TradeCategory, TradeRecord[]> = {
+        backtest: [...backtestTrades],
+        live: [...liveTrades],
+        missed: [...missedTrades],
+      };
+
+      targetCategories.forEach((cat) => {
+        const catTrades = sourceTrades
+          .filter((tr) => tr.category === cat)
+          .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+
+        const seen = new Set<string>();
+        const unique: TradeRecord[] = [];
+        catTrades.forEach((tr) => {
+          const sig = buildTradeCoreDuplicateKey(tr);
+          if (seen.has(sig)) {
+            duplicateIds.push(tr.id);
+          } else {
+            seen.add(sig);
+            unique.push(tr);
+          }
+        });
+        keptByCategory[cat] = unique;
+      });
+
+      if (duplicateIds.length === 0) {
+        showToast(
+          lang === 'en'
+            ? `No duplicates found in ${sectionLabel}.`
+            : lang === 'es'
+              ? `No se encontraron duplicados en ${sectionLabel}.`
+              : `Nessun duplicato trovato in Firebase (${sectionLabel}).`,
+          6000,
+        );
+        return;
+      }
+
+      if (firebaseUser) {
+        await batchDeleteTradesInFirestore(firebaseUser.uid, duplicateIds);
+        duplicateIds.forEach((id) => cloudIdsRef.current.delete(id));
+      }
+
+      if (targetCategories.includes('backtest')) {
+        setBacktestTrades(keptByCategory.backtest);
+        saveTradesSafely('backtest', keptByCategory.backtest);
+      }
+      if (targetCategories.includes('live')) {
+        setLiveTrades(keptByCategory.live);
+        saveTradesSafely('live', keptByCategory.live);
+      }
+      if (targetCategories.includes('missed')) {
+        setMissedTrades(keptByCategory.missed);
+        saveTradesSafely('missed', keptByCategory.missed);
+      }
+
+      const remainingCount = targetCategories.reduce(
+        (sum, cat) => sum + keptByCategory[cat].length,
+        0,
+      );
+
+      showToast(
+        lang === 'en'
+          ? `Cleanup complete (${sectionLabel}): ${duplicateIds.length} duplicates removed from Firebase (${remainingCount} unique trades kept)`
+          : lang === 'es'
+            ? `Limpieza completada (${sectionLabel}): ${duplicateIds.length} duplicados eliminados de Firebase (${remainingCount} trades únicos conservados)`
+            : `Pulizia completata (${sectionLabel}): ${duplicateIds.length} duplicati rimossi da Firebase (${remainingCount} trade unici mantenuti)`,
+        9000,
+      );
+    } catch (err) {
+      setFatalError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setCleaningDuplicates(false);
+    }
   };
 
   const loadDemoTrades = (target: TradeCategory) => {
@@ -1431,6 +1545,18 @@ export function App() {
                 {t.journal.importFile}
               </button>
             ) : null}
+
+            <button
+              type="button"
+              onClick={() => void handleRemoveDuplicates()}
+              disabled={cleaningDuplicates}
+              className="inline-flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3.5 py-2 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50 whitespace-nowrap shrink-0"
+            >
+              <Eraser className={`h-3.5 w-3.5 ${cleaningDuplicates ? 'animate-pulse' : ''}`} />
+              <span>
+                {cleaningDuplicates ? 'Pulizia in corso...' : 'Rimuovi Duplicati'}
+              </span>
+            </button>
 
             <button
               type="button"

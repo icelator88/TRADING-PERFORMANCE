@@ -239,7 +239,11 @@ export function normalizeImportDate(raw: unknown): string {
     }
   }
 
-  const s = String(raw ?? '').trim();
+  const s = String(raw ?? '')
+    .replace(/\u00A0/g, ' ')
+    .trim()
+    .replace(/\s*([/\-.])\s*/g, '$1')
+    .replace(/\s+/g, ' ');
   if (!s) return '';
 
   // YYYY-MM-DD or YYYY/MM/DD
@@ -248,7 +252,7 @@ export function normalizeImportDate(raw: unknown): string {
     return `${isoMatch[1]}-${isoMatch[2].padStart(2, '0')}-${isoMatch[3].padStart(2, '0')}`;
   }
 
-  // DD/MM/YYYY or MM/DD/YYYY (supports 2-digit or 4-digit year)
+  // DD/MM/YYYY or MM/DD/YYYY (supports 1- or 2-digit day/month, 2- or 4-digit year)
   const slashMatch = /^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})/.exec(s);
   if (slashMatch) {
     let p1 = Number(slashMatch[1]);
@@ -293,8 +297,10 @@ function extractEmbeddedTime(raw: unknown): string {
     }
   }
 
-  const s = String(raw ?? '').trim();
-  const timeInStr = /(?:T|\s)(\d{1,2})[:.](\d{2})(?:[:.]\d{2})?\s*(AM|PM)?/i.exec(s);
+  const s = String(raw ?? '')
+    .replace(/\u00A0/g, ' ')
+    .trim();
+  const timeInStr = /(?:T|\s)(\d{1,2})\s*[:.h]\s*(\d{2})(?:[:.]\d{2})?\s*(AM|PM)?/i.exec(s);
   if (timeInStr) {
     let hh = Number(timeInStr[1]);
     const mm = Number(timeInStr[2]);
@@ -310,8 +316,15 @@ function extractEmbeddedTime(raw: unknown): string {
 }
 
 export function normalizeImportTime(raw: unknown): string {
-  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 && raw < 1) {
-    const totalMinutes = Math.round(raw * 24 * 60);
+  const numericFraction =
+    typeof raw === 'number'
+      ? raw
+      : typeof raw === 'string' && /^0(?:[.,]\d+)$/.test(raw.trim())
+        ? Number(raw.trim().replace(',', '.'))
+        : NaN;
+
+  if (Number.isFinite(numericFraction) && numericFraction >= 0 && numericFraction < 1) {
+    const totalMinutes = Math.round(numericFraction * 24 * 60);
     const hh = String(Math.floor(totalMinutes / 60) % 24).padStart(2, '0');
     const mm = String(totalMinutes % 60).padStart(2, '0');
     return `${hh}:${mm}`;
@@ -323,10 +336,12 @@ export function normalizeImportTime(raw: unknown): string {
     return `${hh}:${mm}`;
   }
 
-  const s = String(raw ?? '').trim();
+  const s = String(raw ?? '')
+    .replace(/\u00A0/g, ' ')
+    .trim();
   if (!s) return '';
 
-  const m = /^(\d{1,2})[:.](\d{2})(?:[:.]\d{2})?\s*(AM|PM)?$/i.exec(s);
+  const m = /^(\d{1,2})\s*[:.h]\s*(\d{2})(?:\s*[:.]\s*\d{2})?\s*(AM|PM)?$/i.exec(s);
   if (m) {
     let hh = Number(m[1]);
     const mm = Number(m[2]);
@@ -353,6 +368,61 @@ export function normalizeOpenTimestamp(date: unknown, entryTime?: unknown): stri
   return `${normDate}T${hhmm}`;
 }
 
+export function normalizeAssetKey(raw: unknown): string {
+  return String(raw ?? '')
+    .replace(/\u00A0/g, ' ')
+    .trim()
+    .replace(/\s*\/\s*/g, '/')
+    .replace(/\s+/g, ' ')
+    .toUpperCase();
+}
+
+export function normalizeCanonicalNumberKey(raw: unknown, decimals = 2): string {
+  let num: number | null = null;
+  if (typeof raw === 'number') {
+    num = Number.isFinite(raw) ? raw : 0;
+  } else {
+    num = parseNumericRCell(raw);
+  }
+  const rounded = roundTo(num ?? 0, decimals);
+  const safe = Object.is(rounded, -0) || rounded === 0 ? 0 : rounded;
+  return Number(safe.toFixed(decimals)).toString();
+}
+
+/**
+ * Core composite duplicate signature matching:
+ * Normalized Asset + Strategy + Date + Time + Direction + Outcome + #R
+ * Ensures formatting variations ('08/01/2025' vs '8/1/2025', '4,00' vs '4.00' vs '4',
+ * case differences, and extra whitespace) never create duplicates.
+ */
+export function buildTradeCoreDuplicateKey(
+  trade: Pick<
+    TradeRecord,
+    'date' | 'entryTime' | 'asset' | 'setup' | 'strategy' | 'bias' | 'outcome' | 'netR'
+  >,
+): string {
+  const openTimestamp = normalizeOpenTimestamp(trade.date, trade.entryTime);
+  const symbol = normalizeAssetKey(trade.asset);
+  const setupStrategy = normalizeSetupName(
+    String(trade.setup || trade.strategy || 'S1')
+      .replace(/\u00A0/g, ' ')
+      .trim()
+      .replace(/\s+/g, ' '),
+  )
+    .trim()
+    .toUpperCase();
+  const direction =
+    String(trade.bias ?? '').replace(/\u00A0/g, ' ').trim().toUpperCase() === 'SHORT'
+      ? 'SHORT'
+      : 'LONG';
+  const outcomeKey = normalizeOutcome(
+    String(trade.outcome ?? '').replace(/\u00A0/g, ' ').trim(),
+  );
+  const netRKey = normalizeCanonicalNumberKey(trade.netR, 2);
+
+  return `${symbol}|${setupStrategy}|${openTimestamp}|${direction}|${outcomeKey}|${netRKey}`;
+}
+
 export function buildTradeDuplicateKey(
   trade: Pick<
     TradeRecord,
@@ -374,38 +444,48 @@ export function buildTradeDuplicateKey(
 ): string {
   const openTimestamp = normalizeOpenTimestamp(trade.date, trade.entryTime);
   const exitTimeKey = trade.exitTime ? normalizeImportTime(trade.exitTime) : 'NONE';
-  const symbol = String(trade.asset ?? '').trim().toUpperCase();
+  const symbol = normalizeAssetKey(trade.asset);
   const setupStrategy = normalizeSetupName(
-    trade.setup || trade.strategy || 'S1',
+    String(trade.setup || trade.strategy || 'S1')
+      .replace(/\u00A0/g, ' ')
+      .trim()
+      .replace(/\s+/g, ' '),
   )
     .trim()
     .toUpperCase();
   const direction =
-    String(trade.bias ?? '').trim().toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
-  const outcomeKey = normalizeOutcome(trade.outcome);
+    String(trade.bias ?? '').replace(/\u00A0/g, ' ').trim().toUpperCase() === 'SHORT'
+      ? 'SHORT'
+      : 'LONG';
+  const outcomeKey = normalizeOutcome(
+    String(trade.outcome ?? '').replace(/\u00A0/g, ' ').trim(),
+  );
 
   const normalizePrice = (val: unknown): string => {
-    return typeof val === 'number' && Number.isFinite(val) && val > 0
-      ? String(Number(val.toFixed(6)))
+    const parsed = typeof val === 'number' ? val : parseNumericRCell(val);
+    return parsed !== null && Number.isFinite(parsed) && parsed > 0
+      ? String(Number(parsed.toFixed(6)))
       : 'NONE';
   };
   const entryKey = normalizePrice(trade.entryPrice);
   const slKey = normalizePrice(trade.slPrice);
   const tpKey = normalizePrice(trade.tpPrice);
 
-  const normalize2dp = (val: number): string => {
-    const raw = Number.isFinite(val) ? roundTo(val, 2) : 0;
-    const safe = Object.is(raw, -0) || raw === 0 ? 0 : raw;
-    return safe.toFixed(2);
-  };
+  const netRParsed =
+    typeof trade.netR === 'number' ? trade.netR : parseNumericRCell(trade.netR);
+  const netRVal = netRParsed !== null && Number.isFinite(netRParsed) ? netRParsed : 0;
 
-  const netRVal = Number.isFinite(trade.netR) ? trade.netR : 0;
-  const returnPctVal = Number.isFinite(trade.netReturnPct)
-    ? trade.netReturnPct
-    : netRVal * (Number.isFinite(trade.riskPct) ? trade.riskPct : 1);
+  const returnPctParsed =
+    typeof trade.netReturnPct === 'number'
+      ? trade.netReturnPct
+      : parseNumericRCell(trade.netReturnPct);
+  const returnPctVal =
+    returnPctParsed !== null && Number.isFinite(returnPctParsed)
+      ? returnPctParsed
+      : netRVal * (Number.isFinite(trade.riskPct) ? trade.riskPct : 1);
 
-  const netRKey = normalize2dp(netRVal);
-  const returnPctKey = normalize2dp(returnPctVal);
+  const netRKey = normalizeCanonicalNumberKey(netRVal, 2);
+  const returnPctKey = normalizeCanonicalNumberKey(returnPctVal, 2);
 
   return `${openTimestamp}|${exitTimeKey}|${symbol}|${setupStrategy}|${direction}|${outcomeKey}|${netRKey}|${returnPctKey}|${entryKey}|${slKey}|${tpKey}`;
 }
@@ -413,11 +493,13 @@ export function buildTradeDuplicateKey(
 export function deduplicateImportedTrades(
   existingTrades: TradeRecord[],
   incomingTrades: TradeRecord[],
+  options?: { keyFn?: (trade: TradeRecord) => string },
 ): { addedTrades: TradeRecord[]; skippedDuplicates: number } {
+  const getKey = options?.keyFn ?? buildTradeDuplicateKey;
   const seenKeys = new Set<string>();
   const seenIds = new Set<string>();
   existingTrades.forEach((tr) => {
-    seenKeys.add(buildTradeDuplicateKey(tr));
+    seenKeys.add(getKey(tr));
     if (tr.id) seenIds.add(tr.id);
   });
 
@@ -425,7 +507,7 @@ export function deduplicateImportedTrades(
   let skippedDuplicates = 0;
 
   incomingTrades.forEach((tr) => {
-    const key = buildTradeDuplicateKey(tr);
+    const key = getKey(tr);
     if (seenKeys.has(key) || (tr.id && seenIds.has(tr.id))) {
       skippedDuplicates += 1;
       return;
@@ -769,7 +851,10 @@ function extractSheetHyperlinks(
   return map;
 }
 
-export function parseExcelWorkbookBuffer(arrayBuffer: ArrayBuffer): {
+export function parseExcelWorkbookBuffer(
+  arrayBuffer: ArrayBuffer,
+  options?: { sheetNameFilter?: (sheetName: string) => boolean },
+): {
   sheets: ParsedSheetData[];
   sheetNames: string[];
 } {
@@ -793,7 +878,11 @@ export function parseExcelWorkbookBuffer(arrayBuffer: ArrayBuffer): {
     throw new Error('La cartella di lavoro Excel non contiene alcun foglio.');
   }
 
-  const sheets = workbook.SheetNames.map((sheetName) => {
+  const targetSheetNames = options?.sheetNameFilter
+    ? workbook.SheetNames.filter(options.sheetNameFilter)
+    : workbook.SheetNames;
+
+  const sheets = targetSheetNames.map((sheetName) => {
     const sheet = workbook.Sheets[sheetName];
     if (!sheet) return null;
     const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {

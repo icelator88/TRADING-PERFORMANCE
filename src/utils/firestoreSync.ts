@@ -497,6 +497,31 @@ export async function deleteTradeInFirestore(
   }
 }
 
+export async function batchDeleteTradesInFirestore(
+  uid: string,
+  tradeIds: string[],
+): Promise<void> {
+  if (tradeIds.length === 0) return;
+  const safeUid = sanitizeId(uid, 'user');
+  const colPath = `users/${safeUid}/trades`;
+
+  const CHUNK_SIZE = 400;
+  try {
+    for (let i = 0; i < tradeIds.length; i += CHUNK_SIZE) {
+      const chunk = tradeIds.slice(i, i + CHUNK_SIZE);
+      const batch = writeBatch(db);
+      chunk.forEach((rawId) => {
+        const safeId = sanitizeId(rawId, 'tr');
+        const ref = doc(db, 'users', safeUid, 'trades', safeId);
+        batch.delete(ref);
+      });
+      await batch.commit();
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, colPath);
+  }
+}
+
 function docToGoogleSheetSource(
   data: Record<string, unknown>,
   docId: string,

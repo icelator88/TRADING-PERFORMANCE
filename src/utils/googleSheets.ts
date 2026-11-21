@@ -1,11 +1,31 @@
 import type { GoogleSheetSource, TradeRecord } from '../types/trading';
-import { normalizeSetupName } from './calculations';
 import {
   autoDetectColumnMapping,
   buildTradesFromSheet,
-  matchKnownSheetStrategy,
   parseExcelWorkbookBuffer,
 } from './importer';
+
+export const GOOGLE_SHEET_STRATEGY_TABS: Record<string, string> = {
+  S1: 'S1',
+  SSA: 'SSA',
+  MUTAZIONE: 'MUT',
+  'SBIL. DOMINANCE REALE': 'SBIL DOMINANCE REALE',
+  'SBIL. DOMINANCE INTRAS. 1CANDELA': 'SBIL INTRADOMINANCE',
+  // Excel/XLSX export caps worksheet names at 31 chars (truncates trailing "a")
+  'SBIL. DOMINANCE INTRAS. 1CANDEL': 'SBIL INTRADOMINANCE',
+};
+
+export function matchExactGoogleSheetStrategyTab(
+  sheetName: string,
+): string | null {
+  const key = String(sheetName ?? '')
+    .replace(/\u00A0/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toUpperCase();
+  if (!key) return null;
+  return GOOGLE_SHEET_STRATEGY_TABS[key] ?? null;
+}
 
 export interface ParsedGoogleSheetLink {
   spreadsheetId: string;
@@ -88,8 +108,70 @@ function hasXlsxMagicBytes(buffer: ArrayBuffer): boolean {
 }
 
 /**
+ * Parses an already-downloaded Google Sheets XLSX ArrayBuffer, strictly reading ONLY the 5 exact strategy tabs
+ * ('S1', 'SSA', 'MUTAZIONE', 'SBIL. DOMINANCE REALE', 'SBIL. DOMINANCE INTRAS. 1candela') and ignoring any others.
+ */
+export function parseGoogleSheetWorkbookBuffer(
+  arrayBuffer: ArrayBuffer,
+  assetName: string,
+  category: 'backtest' | 'live',
+): GoogleSheetFetchResult {
+  const cleanAsset = assetName.trim().toUpperCase();
+  const { sheets, sheetNames } = parseExcelWorkbookBuffer(arrayBuffer, {
+    sheetNameFilter: (name) => matchExactGoogleSheetStrategyTab(name) !== null,
+  });
+
+  const matchedWorkbookTabs = sheetNames.filter(
+    (name) => matchExactGoogleSheetStrategyTab(name) !== null,
+  );
+
+  if (matchedWorkbookTabs.length === 0) {
+    throw new Error(
+      `Nessuna delle 5 schede strategia ('S1', 'SSA', 'MUTAZIONE', 'SBIL. DOMINANCE REALE', 'SBIL. DOMINANCE INTRAS. 1candela') trovata nel foglio di ${cleanAsset}. Schede presenti: ${sheetNames.join(', ')}`,
+    );
+  }
+
+  const allTrades: TradeRecord[] = [];
+  const matchedTabs: { sheetName: string; strategy: string; rowCount: number }[] = [];
+
+  for (const sheet of sheets) {
+    const exactStrategy = matchExactGoogleSheetStrategyTab(sheet.sheetName);
+    if (!exactStrategy) continue;
+
+    const mapping = autoDetectColumnMapping(sheet.headers);
+    const sheetTrades = buildTradesFromSheet(
+      sheet,
+      mapping,
+      category,
+      exactStrategy,
+      cleanAsset,
+    ).map((tr) => ({
+      ...tr,
+      asset: cleanAsset,
+      setup: exactStrategy,
+      strategy: exactStrategy,
+    }));
+
+    if (sheetTrades.length > 0) {
+      matchedTabs.push({
+        sheetName: sheet.sheetName,
+        strategy: exactStrategy,
+        rowCount: sheetTrades.length,
+      });
+      allTrades.push(...sheetTrades);
+    }
+  }
+
+  return {
+    trades: allTrades,
+    sheetNames: matchedWorkbookTabs,
+    matchedTabs,
+  };
+}
+
+/**
  * Directly downloads the multi-tab XLSX workbook from Google Sheets export endpoint,
- * reads all strategy tabs (S1, SSA, MUTAZIONE, SBIL. DOMINANCE REALE, SBIL. DOMINANCE INTRAS. 1candela),
+ * strictly reads ONLY the 5 exact strategy tabs (ignoring summary/dashboard/extra tabs),
  * maps exact columns + hyperlink URLs, and builds normalized TradeRecord entries tagged with source.asset.
  */
 export async function fetchAndParseGoogleSheetTrades(
@@ -140,43 +222,5 @@ export async function fetchAndParseGoogleSheetTrades(
     );
   }
 
-  const { sheets, sheetNames } = parseExcelWorkbookBuffer(arrayBuffer);
-  const allTrades: TradeRecord[] = [];
-  const matchedTabs: { sheetName: string; strategy: string; rowCount: number }[] = [];
-
-  for (const sheet of sheets) {
-    const mapping = autoDetectColumnMapping(sheet.headers);
-    const knownTabSetup = matchKnownSheetStrategy(sheet.sheetName);
-    const setupOverride = knownTabSetup
-      ? knownTabSetup
-      : sheet.detectedFiveBlocks
-        ? 'AUTO'
-        : normalizeSetupName(sheet.sheetName);
-
-    const sheetTrades = buildTradesFromSheet(
-      sheet,
-      mapping,
-      source.category,
-      setupOverride,
-      assetName,
-    ).map((tr) => ({
-      ...tr,
-      asset: assetName,
-    }));
-
-    if (sheetTrades.length > 0) {
-      matchedTabs.push({
-        sheetName: sheet.sheetName,
-        strategy: setupOverride === 'AUTO' ? 'MULTI' : setupOverride,
-        rowCount: sheetTrades.length,
-      });
-      allTrades.push(...sheetTrades);
-    }
-  }
-
-  return {
-    trades: allTrades,
-    sheetNames,
-    matchedTabs,
-  };
+  return parseGoogleSheetWorkbookBuffer(arrayBuffer, assetName, source.category);
 }
