@@ -98,6 +98,9 @@ export function App() {
   const [activePortfolioAssets, setActivePortfolioAssets] = useState<string[] | null>(
     null,
   );
+  const [portfolioFilterMode, setPortfolioFilterMode] = useState<
+    'active_only' | 'all'
+  >('active_only');
   const [customAssets, setCustomAssets] = useState<string[]>([]);
 
   const [backtestTrades, setBacktestTrades] = useState<TradeRecord[]>([]);
@@ -215,6 +218,7 @@ export function App() {
   };
 
   const handleTogglePortfolioAsset = (asset: string, allBacktestAssets: string[]) => {
+    setPortfolioFilterMode('active_only');
     const normAsset = asset.trim().toUpperCase();
     const currentList =
       activePortfolioAssets === null ? allBacktestAssets : activePortfolioAssets;
@@ -230,11 +234,13 @@ export function App() {
   };
 
   const handleSelectAllPortfolioAssets = () => {
+    setPortfolioFilterMode('active_only');
     setActivePortfolioAssets(null);
     syncSettingsPatch({ activePortfolioAssets: null });
   };
 
   const handleClearPortfolioAssets = () => {
+    setPortfolioFilterMode('active_only');
     setActivePortfolioAssets([]);
     syncSettingsPatch({ activePortfolioAssets: [] });
   };
@@ -571,31 +577,13 @@ export function App() {
     [missedTrades, selectedSetup, assetFilter],
   );
 
-  // Statistics Engines
-  // Backtest / Live / Missed tab stats remain unaffected by Dashboard portfolio toggle
-  const akinatorScan = useMemo(
-    () => calculateAkinatorBacktestScan(filteredBacktest),
-    [filteredBacktest],
-  );
-
-  const backtestStats = useMemo(
-    () => calculatePerformanceStats(filteredBacktest),
-    [filteredBacktest],
-  );
-
-  // Live Journaling stats include tracked UNFILLED setups in totalTrades/unfilled, while Win Rate % excludes UNFILLED
-  const liveStats = useMemo(
-    () => calculatePerformanceStats(filteredLive),
-    [filteredLive],
-  );
-
   // Trade Non Presi is 100% standalone and never reads from Journal Reale or Backtest
   const missedStats = useMemo(
     () => calculateMissedStats(filteredMissed),
     [filteredMissed],
   );
 
-  // Active Portfolio Assets available in Backtest (+ registered custom assets) for Dashboard multi-select toggle bar
+  // Shared Active Portfolio Assets across Dashboard, Backtest, and Journal Reale (persisted in Firebase)
   const backtestPortfolioAssets = useMemo(
     () =>
       Array.from(
@@ -604,10 +592,27 @@ export function App() {
             .filter((tr) => tr.category === 'backtest')
             .map((tr) => tr.asset.trim().toUpperCase())
             .filter(Boolean),
+          ...liveTrades
+            .filter((tr) => tr.category === 'live')
+            .map((tr) => tr.asset.trim().toUpperCase())
+            .filter(Boolean),
           ...customAssets.map((a) => a.trim().toUpperCase()).filter(Boolean),
         ]),
       ).sort(),
-    [backtestTrades, customAssets],
+    [backtestTrades, liveTrades, customAssets],
+  );
+
+  const backtestOnlyAssets = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          backtestTrades
+            .filter((tr) => tr.category === 'backtest')
+            .map((tr) => tr.asset.trim().toUpperCase())
+            .filter(Boolean),
+        ),
+      ).sort(),
+    [backtestTrades],
   );
 
   const activePortfolioAssetSet = useMemo(
@@ -620,31 +625,61 @@ export function App() {
     [activePortfolioAssets, backtestPortfolioAssets],
   );
 
-  const dashboardPortfolioBacktest = useMemo(
-    () =>
-      filteredBacktest.filter((tr) =>
-        activePortfolioAssetSet.has(tr.asset.trim().toUpperCase()),
-      ),
-    [filteredBacktest, activePortfolioAssetSet],
-  );
+  const dashboardPortfolioBacktest = useMemo(() => {
+    if (portfolioFilterMode === 'all') {
+      return filteredBacktest;
+    }
+    return filteredBacktest.filter((tr) =>
+      activePortfolioAssetSet.has(tr.asset.trim().toUpperCase()),
+    );
+  }, [filteredBacktest, activePortfolioAssetSet, portfolioFilterMode]);
 
   const dashboardPortfolioLive = useMemo(() => {
-    if (backtestPortfolioAssets.length === 0 && activePortfolioAssets === null) {
+    if (
+      portfolioFilterMode === 'all' ||
+      (backtestPortfolioAssets.length === 0 && activePortfolioAssets === null)
+    ) {
       return filteredLive;
     }
     return filteredLive.filter((tr) =>
       activePortfolioAssetSet.has(tr.asset.trim().toUpperCase()),
     );
-  }, [filteredLive, activePortfolioAssetSet, backtestPortfolioAssets.length, activePortfolioAssets]);
+  }, [
+    filteredLive,
+    activePortfolioAssetSet,
+    backtestPortfolioAssets.length,
+    activePortfolioAssets,
+    portfolioFilterMode,
+  ]);
 
   const dashboardPortfolioMissed = useMemo(() => {
-    if (backtestPortfolioAssets.length === 0 && activePortfolioAssets === null) {
+    if (
+      portfolioFilterMode === 'all' ||
+      (backtestPortfolioAssets.length === 0 && activePortfolioAssets === null)
+    ) {
       return filteredMissed;
     }
     return filteredMissed.filter((tr) =>
       activePortfolioAssetSet.has(tr.asset.trim().toUpperCase()),
     );
-  }, [filteredMissed, activePortfolioAssetSet, backtestPortfolioAssets.length, activePortfolioAssets]);
+  }, [
+    filteredMissed,
+    activePortfolioAssetSet,
+    backtestPortfolioAssets.length,
+    activePortfolioAssets,
+    portfolioFilterMode,
+  ]);
+
+  // Synchronized stats for Backtest & Journal Reale tabs honoring the shared Active Portfolio Assets bar
+  const backtestStats = useMemo(
+    () => calculatePerformanceStats(dashboardPortfolioBacktest),
+    [dashboardPortfolioBacktest],
+  );
+
+  const liveStats = useMemo(
+    () => calculatePerformanceStats(dashboardPortfolioLive),
+    [dashboardPortfolioLive],
+  );
 
   const dashboardAkinatorScan = useMemo(
     () => calculateAkinatorBacktestScan(dashboardPortfolioBacktest),
@@ -703,7 +738,7 @@ export function App() {
 
   // Portfolio Rotation Alert: monitor unselected Backtest assets over the last 30 days
   const portfolioRotationAlert = useMemo(() => {
-    if (backtestPortfolioAssets.length === 0) return null;
+    if (backtestOnlyAssets.length === 0) return null;
 
     let latestDate = '';
     for (const tr of backtestTrades) {
@@ -725,7 +760,7 @@ export function App() {
       .slice(0, 10);
 
     const netRByAsset = new Map<string, number>();
-    for (const asset of backtestPortfolioAssets) {
+    for (const asset of backtestOnlyAssets) {
       netRByAsset.set(asset, 0);
     }
 
@@ -741,11 +776,11 @@ export function App() {
       netRByAsset.set(assetKey, roundTo((netRByAsset.get(assetKey) ?? 0) + delta, 2));
     }
 
-    const selectedAssets = backtestPortfolioAssets
+    const selectedAssets = backtestOnlyAssets
       .filter((asset) => activePortfolioAssetSet.has(asset))
       .map((asset) => ({ asset, netR: roundTo(netRByAsset.get(asset) ?? 0, 2) }));
 
-    const unselectedAssets = backtestPortfolioAssets
+    const unselectedAssets = backtestOnlyAssets
       .filter((asset) => !activePortfolioAssetSet.has(asset))
       .map((asset) => ({ asset, netR: roundTo(netRByAsset.get(asset) ?? 0, 2) }));
 
@@ -773,7 +808,7 @@ export function App() {
       opportunities: qualifying,
     };
   }, [
-    backtestPortfolioAssets,
+    backtestOnlyAssets,
     backtestTrades,
     liveTrades,
     selectedSetup,
@@ -1991,82 +2026,123 @@ export function App() {
           </div>
         </div>
 
-        {/* TAB 1: DASHBOARD & COMPARISON */}
-        {activeTab === 'dashboard' ? (
-          <div className="space-y-8">
-            {/* Multi-select Active Portfolio Assets Toggle Bar (Persisted in Firebase) */}
-            {backtestPortfolioAssets.length > 0 ? (
-              <section
-                aria-label="Active Portfolio Assets"
-                className="rounded-lg border border-[#1E2634] bg-[#121721] px-4 py-3.5"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2.5">
-                  <div className="flex items-center gap-2.5">
-                    <span className="text-xs font-semibold text-slate-200">
-                      Active Portfolio Assets
-                    </span>
-                    <span className="rounded border border-[#263042] bg-[#0B0E14] px-2 py-0.5 font-mono text-[11px] text-sky-300 tabular-nums">
-                      {
+        {/* Shared Multi-Select Active Portfolio Assets Bar across Dashboard, Backtest, and Journal Reale (Persisted in Firebase; Trade Non Presi excluded) */}
+        {(activeTab === 'dashboard' ||
+          activeTab === 'backtest' ||
+          activeTab === 'live') &&
+        backtestPortfolioAssets.length > 0 ? (
+          <section
+            aria-label="Active Portfolio Assets"
+            className="rounded-lg border border-[#1E2634] bg-[#121721] px-4 py-3.5"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <span className="text-xs font-semibold text-slate-200">
+                  Active Portfolio Assets
+                </span>
+                <span className="rounded border border-[#263042] bg-[#0B0E14] px-2 py-0.5 font-mono text-[11px] text-sky-300 tabular-nums">
+                  {portfolioFilterMode === 'all'
+                    ? `${backtestPortfolioAssets.length}/${backtestPortfolioAssets.length}`
+                    : `${
                         backtestPortfolioAssets.filter((a) =>
                           activePortfolioAssetSet.has(a),
                         ).length
-                      }
-                      /{backtestPortfolioAssets.length}
+                      }/${backtestPortfolioAssets.length}`}
+                </span>
+
+                <div
+                  role="group"
+                  aria-label="Modalità filtro portafoglio"
+                  className="inline-flex items-center rounded-md border border-[#263042] bg-[#0B0E14] p-0.5 text-[11px]"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setPortfolioFilterMode('active_only')}
+                    className={`rounded px-2.5 py-0.5 font-semibold transition-colors whitespace-nowrap ${
+                      portfolioFilterMode === 'active_only'
+                        ? 'bg-sky-600 text-white'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Solo Attivi
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPortfolioFilterMode('all')}
+                    className={`rounded px-2.5 py-0.5 font-semibold transition-colors whitespace-nowrap ${
+                      portfolioFilterMode === 'all'
+                        ? 'bg-emerald-600 text-white'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Tutti
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 text-[11px]">
+                <button
+                  type="button"
+                  onClick={handleSelectAllPortfolioAssets}
+                  className="rounded border border-[#263042] bg-[#0B0E14] px-2.5 py-1 font-medium text-slate-300 transition-colors hover:border-sky-500/50 hover:text-white"
+                >
+                  {lang === 'en' ? 'Select all' : 'Seleziona tutti'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleClearPortfolioAssets}
+                  className="rounded border border-[#263042] bg-[#0B0E14] px-2.5 py-1 font-medium text-slate-400 transition-colors hover:border-rose-500/40 hover:text-rose-300"
+                >
+                  {lang === 'en' ? 'Clear' : 'Deseleziona tutti'}
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-2.5 flex flex-wrap items-center gap-2">
+              {backtestPortfolioAssets.map((asset) => {
+                const isSelected = activePortfolioAssetSet.has(asset);
+                const visualChecked = portfolioFilterMode === 'all' ? true : isSelected;
+                return (
+                  <button
+                    key={asset}
+                    type="button"
+                    role="checkbox"
+                    aria-checked={isSelected}
+                    onClick={() =>
+                      handleTogglePortfolioAsset(asset, backtestPortfolioAssets)
+                    }
+                    className={`inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 font-mono text-xs font-medium transition-colors whitespace-nowrap ${
+                      portfolioFilterMode === 'all'
+                        ? isSelected
+                          ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-200'
+                          : 'border-[#263042] bg-[#0B0E14] text-slate-300 hover:border-sky-500/50'
+                        : isSelected
+                          ? 'border-sky-500/60 bg-sky-500/15 text-sky-200'
+                          : 'border-[#1E2634] bg-[#0B0E14] text-slate-400 hover:border-slate-600 hover:text-slate-200'
+                    }`}
+                  >
+                    <span
+                      className={`flex h-3.5 w-3.5 items-center justify-center rounded-xs border ${
+                        visualChecked
+                          ? portfolioFilterMode === 'all' && !isSelected
+                            ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-300'
+                            : 'border-sky-400 bg-sky-500 text-[#0B0E14]'
+                          : 'border-slate-600 bg-transparent'
+                      }`}
+                    >
+                      {visualChecked ? <Check className="h-2.5 w-2.5 stroke-[3]" /> : null}
                     </span>
-                  </div>
+                    <span>{asset}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        ) : null}
 
-                  <div className="flex items-center gap-2 text-[11px]">
-                    <button
-                      type="button"
-                      onClick={handleSelectAllPortfolioAssets}
-                      className="rounded border border-[#263042] bg-[#0B0E14] px-2.5 py-1 font-medium text-slate-300 transition-colors hover:border-sky-500/50 hover:text-white"
-                    >
-                      {lang === 'en' ? 'Select all' : 'Seleziona tutti'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleClearPortfolioAssets}
-                      className="rounded border border-[#263042] bg-[#0B0E14] px-2.5 py-1 font-medium text-slate-400 transition-colors hover:border-rose-500/40 hover:text-rose-300"
-                    >
-                      {lang === 'en' ? 'Clear' : 'Deseleziona tutti'}
-                    </button>
-                  </div>
-                </div>
-
-                <div className="mt-2.5 flex flex-wrap items-center gap-2">
-                  {backtestPortfolioAssets.map((asset) => {
-                    const checked = activePortfolioAssetSet.has(asset);
-                    return (
-                      <button
-                        key={asset}
-                        type="button"
-                        role="checkbox"
-                        aria-checked={checked}
-                        onClick={() =>
-                          handleTogglePortfolioAsset(asset, backtestPortfolioAssets)
-                        }
-                        className={`inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 font-mono text-xs font-medium transition-colors whitespace-nowrap ${
-                          checked
-                            ? 'border-sky-500/60 bg-sky-500/15 text-sky-200'
-                            : 'border-[#1E2634] bg-[#0B0E14] text-slate-400 hover:border-slate-600 hover:text-slate-200'
-                        }`}
-                      >
-                        <span
-                          className={`flex h-3.5 w-3.5 items-center justify-center rounded-xs border ${
-                            checked
-                              ? 'border-sky-400 bg-sky-500 text-[#0B0E14]'
-                              : 'border-slate-600 bg-transparent'
-                          }`}
-                        >
-                          {checked ? <Check className="h-2.5 w-2.5 stroke-[3]" /> : null}
-                        </span>
-                        <span>{asset}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </section>
-            ) : null}
+        {/* TAB 1: DASHBOARD & COMPARISON */}
+        {activeTab === 'dashboard' ? (
+          <div className="space-y-8">
 
             {/* Portfolio Rotation Alert Banner (Last 30 Days vs Latest DB Trade Date) */}
             {portfolioRotationAlert ? (
@@ -2604,7 +2680,7 @@ export function App() {
             </div>
 
             <TradeTable
-              trades={applySearchAndSubFilters(filteredBacktest, 'backtest')}
+              trades={applySearchAndSubFilters(dashboardPortfolioBacktest, 'backtest')}
               category="backtest"
               t={t}
               emptyMessage={t.journal.emptyBacktest}
@@ -2742,7 +2818,7 @@ export function App() {
             </div>
 
             <TradeTable
-              trades={applySearchAndSubFilters(filteredLive, 'live')}
+              trades={applySearchAndSubFilters(dashboardPortfolioLive, 'live')}
               category="live"
               t={t}
               emptyMessage={t.journal.emptyLive}
