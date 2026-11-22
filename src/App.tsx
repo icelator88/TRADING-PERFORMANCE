@@ -26,6 +26,7 @@ import {
 import { ImportModal } from './components/ImportModal';
 import { InstitutionalMetricsPanel } from './components/InstitutionalMetricsPanel';
 import { LoginScreen } from './components/LoginScreen';
+import { MartingaleSimulatorCard } from './components/MartingaleSimulatorCard';
 import { NewAssetModal } from './components/NewAssetModal';
 import { SetupFilterBar } from './components/SetupFilterBar';
 import { TradeModal } from './components/TradeModal';
@@ -2556,6 +2557,13 @@ export function App() {
               primaryLabel={t.nav.backtest}
               comparisonLabel={t.nav.live}
               lang={lang}
+            />
+
+            {/* Read-Only What-If Progression & Martingale Simulator */}
+            <MartingaleSimulatorCard
+              lang={lang}
+              backtestTrades={dashboardBacktestTrades}
+              liveTrades={dashboardPortfolioLive}
             />
           </div>
         ) : null}
