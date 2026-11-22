@@ -73,6 +73,10 @@
           "type": "string",
           "maxLength": 32
         },
+        "activePortfolioAssets": {
+          "type": "array",
+          "description": "Selected Backtest assets active in Dashboard comparisons."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

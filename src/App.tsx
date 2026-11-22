@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Check,
   Cloud,
   Download,
   Eraser,
@@ -88,6 +89,9 @@ export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
   const [selectedSetup, setSelectedSetup] = useState<string>('ALL');
   const [assetFilter, setAssetFilter] = useState<string>('ALL');
+  const [activePortfolioAssets, setActivePortfolioAssets] = useState<string[] | null>(
+    null,
+  );
 
   const [backtestTrades, setBacktestTrades] = useState<TradeRecord[]>([]);
   const [liveTrades, setLiveTrades] = useState<TradeRecord[]>([]);
@@ -146,6 +150,7 @@ export function App() {
     activeTab,
     selectedSetup,
     assetFilter,
+    activePortfolioAssets,
   });
 
   useEffect(() => {
@@ -154,8 +159,9 @@ export function App() {
       activeTab,
       selectedSetup,
       assetFilter,
+      activePortfolioAssets,
     };
-  }, [lang, activeTab, selectedSetup, assetFilter]);
+  }, [lang, activeTab, selectedSetup, assetFilter, activePortfolioAssets]);
 
   if (fatalError) {
     throw fatalError;
@@ -195,6 +201,31 @@ export function App() {
   const handleAssetFilterChange = (nextAsset: string) => {
     setAssetFilter(nextAsset);
     syncSettingsPatch({ assetFilter: nextAsset });
+  };
+
+  const handleTogglePortfolioAsset = (asset: string, allBacktestAssets: string[]) => {
+    const normAsset = asset.trim().toUpperCase();
+    const currentList =
+      activePortfolioAssets === null ? allBacktestAssets : activePortfolioAssets;
+    const currentSet = new Set(currentList.map((a) => a.trim().toUpperCase()));
+    if (currentSet.has(normAsset)) {
+      currentSet.delete(normAsset);
+    } else {
+      currentSet.add(normAsset);
+    }
+    const nextList = Array.from(currentSet).sort();
+    setActivePortfolioAssets(nextList);
+    syncSettingsPatch({ activePortfolioAssets: nextList });
+  };
+
+  const handleSelectAllPortfolioAssets = () => {
+    setActivePortfolioAssets(null);
+    syncSettingsPatch({ activePortfolioAssets: null });
+  };
+
+  const handleClearPortfolioAssets = () => {
+    setActivePortfolioAssets([]);
+    syncSettingsPatch({ activePortfolioAssets: [] });
   };
 
   const showToast = (msg: string, duration = 4500) => {
@@ -244,6 +275,7 @@ export function App() {
         setLiveTrades([]);
         setMissedTrades([]);
         setGoogleSheets([]);
+        setActivePortfolioAssets(null);
         setFirebaseUser(null);
         setCloudSyncStatus('idle');
         setAuthReady(true);
@@ -291,6 +323,7 @@ export function App() {
           setActiveTab(cloudSettings.activeTab);
           setSelectedSetup(cloudSettings.selectedSetup);
           setAssetFilter(cloudSettings.assetFilter);
+          setActivePortfolioAssets(cloudSettings.activePortfolioAssets ?? null);
         },
         (err) => {
           if (active) setFatalError(err);
@@ -414,7 +447,7 @@ export function App() {
   );
 
   // Statistics Engines
-  // Akinator strictly scans ONLY Backtest trades (excludes Live Journaling & Missed Trades)
+  // Backtest / Live / Missed tab stats remain unaffected by Dashboard portfolio toggle
   const akinatorScan = useMemo(
     () => calculateAkinatorBacktestScan(filteredBacktest),
     [filteredBacktest],
@@ -437,6 +470,61 @@ export function App() {
     [filteredMissed],
   );
 
+  // Active Portfolio Assets available in Backtest for Dashboard multi-select toggle bar
+  const backtestPortfolioAssets = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          backtestTrades
+            .filter((tr) => tr.category === 'backtest')
+            .map((tr) => tr.asset.trim().toUpperCase())
+            .filter(Boolean),
+        ),
+      ).sort(),
+    [backtestTrades],
+  );
+
+  const activePortfolioAssetSet = useMemo(
+    () =>
+      new Set(
+        activePortfolioAssets === null
+          ? backtestPortfolioAssets
+          : activePortfolioAssets.map((a) => a.trim().toUpperCase()),
+      ),
+    [activePortfolioAssets, backtestPortfolioAssets],
+  );
+
+  const dashboardPortfolioBacktest = useMemo(
+    () =>
+      filteredBacktest.filter((tr) =>
+        activePortfolioAssetSet.has(tr.asset.trim().toUpperCase()),
+      ),
+    [filteredBacktest, activePortfolioAssetSet],
+  );
+
+  const dashboardPortfolioLive = useMemo(() => {
+    if (backtestPortfolioAssets.length === 0 && activePortfolioAssets === null) {
+      return filteredLive;
+    }
+    return filteredLive.filter((tr) =>
+      activePortfolioAssetSet.has(tr.asset.trim().toUpperCase()),
+    );
+  }, [filteredLive, activePortfolioAssetSet, backtestPortfolioAssets.length, activePortfolioAssets]);
+
+  const dashboardPortfolioMissed = useMemo(() => {
+    if (backtestPortfolioAssets.length === 0 && activePortfolioAssets === null) {
+      return filteredMissed;
+    }
+    return filteredMissed.filter((tr) =>
+      activePortfolioAssetSet.has(tr.asset.trim().toUpperCase()),
+    );
+  }, [filteredMissed, activePortfolioAssetSet, backtestPortfolioAssets.length, activePortfolioAssets]);
+
+  const dashboardAkinatorScan = useMemo(
+    () => calculateAkinatorBacktestScan(dashboardPortfolioBacktest),
+    [dashboardPortfolioBacktest],
+  );
+
   // Earliest live trade date per asset in Journal Reale (YYYY-MM-DD) for aligned Dashboard comparison
   const liveStartDateByAsset = useMemo(() => {
     const earliestByAsset = new Map<string, string>();
@@ -452,9 +540,9 @@ export function App() {
     return earliestByAsset;
   }, [liveTrades]);
 
-  // Earliest visible live trade date (YYYY-MM-DD) for shared EquityChart timeline & header badge
+  // Earliest visible live trade date (YYYY-MM-DD) among active portfolio assets for shared EquityChart timeline & header badge
   const liveStartDate = useMemo(() => {
-    const validFilteredDates = filteredLive
+    const validFilteredDates = dashboardPortfolioLive
       .map((tr) => tr.date)
       .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
     if (validFilteredDates.length > 0) {
@@ -464,23 +552,107 @@ export function App() {
       );
     }
     return null;
-  }, [filteredLive]);
+  }, [dashboardPortfolioLive]);
 
   const isLiveAligned = dashboardRangeMode === 'live_period';
 
   const dashboardBacktestTrades = useMemo(() => {
-    if (!isLiveAligned) return filteredBacktest;
-    return filteredBacktest.filter((tr) => {
+    if (!isLiveAligned) return dashboardPortfolioBacktest;
+    return dashboardPortfolioBacktest.filter((tr) => {
       const assetKey = tr.asset.trim().toUpperCase();
       const assetLiveStart = liveStartDateByAsset.get(assetKey);
       return assetLiveStart !== undefined && tr.date >= assetLiveStart;
     });
-  }, [filteredBacktest, isLiveAligned, liveStartDateByAsset]);
+  }, [dashboardPortfolioBacktest, isLiveAligned, liveStartDateByAsset]);
 
   const dashboardBacktestStats = useMemo(
     () => calculatePerformanceStats(dashboardBacktestTrades),
     [dashboardBacktestTrades],
   );
+
+  const dashboardLiveStats = useMemo(
+    () => calculatePerformanceStats(dashboardPortfolioLive),
+    [dashboardPortfolioLive],
+  );
+
+  // Portfolio Rotation Alert: monitor unselected Backtest assets over the last 30 days
+  const portfolioRotationAlert = useMemo(() => {
+    if (backtestPortfolioAssets.length === 0) return null;
+
+    let latestDate = '';
+    for (const tr of backtestTrades) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(tr.date) && tr.date > latestDate) {
+        latestDate = tr.date;
+      }
+    }
+    for (const tr of liveTrades) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(tr.date) && tr.date > latestDate) {
+        latestDate = tr.date;
+      }
+    }
+    if (!latestDate) return null;
+
+    const refMs = Date.parse(`${latestDate}T00:00:00Z`);
+    if (!Number.isFinite(refMs)) return null;
+    const windowStart = new Date(refMs - 30 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+
+    const netRByAsset = new Map<string, number>();
+    for (const asset of backtestPortfolioAssets) {
+      netRByAsset.set(asset, 0);
+    }
+
+    for (const tr of backtestTrades) {
+      if (tr.category !== 'backtest') continue;
+      if (selectedSetup !== 'ALL' && tr.setup !== selectedSetup) continue;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(tr.date)) continue;
+      if (tr.date < windowStart || tr.date > latestDate) continue;
+
+      const assetKey = tr.asset.trim().toUpperCase();
+      if (!assetKey) continue;
+      const delta = Number.isFinite(tr.netR) ? tr.netR : 0;
+      netRByAsset.set(assetKey, roundTo((netRByAsset.get(assetKey) ?? 0) + delta, 2));
+    }
+
+    const selectedAssets = backtestPortfolioAssets
+      .filter((asset) => activePortfolioAssetSet.has(asset))
+      .map((asset) => ({ asset, netR: roundTo(netRByAsset.get(asset) ?? 0, 2) }));
+
+    const unselectedAssets = backtestPortfolioAssets
+      .filter((asset) => !activePortfolioAssetSet.has(asset))
+      .map((asset) => ({ asset, netR: roundTo(netRByAsset.get(asset) ?? 0, 2) }));
+
+    if (selectedAssets.length === 0 || unselectedAssets.length === 0) return null;
+
+    const weakestSelected = selectedAssets.reduce((min, cur) =>
+      cur.netR < min.netR ? cur : min,
+    );
+
+    const qualifying = unselectedAssets
+      .filter((item) => item.netR > 5 && item.netR > weakestSelected.netR)
+      .sort((a, b) => b.netR - a.netR)
+      .map((item) => ({
+        asset: item.asset,
+        netR: item.netR,
+        comparedAsset: weakestSelected.asset,
+        comparedNetR: weakestSelected.netR,
+      }));
+
+    if (qualifying.length === 0) return null;
+
+    return {
+      windowStart,
+      latestDate,
+      opportunities: qualifying,
+    };
+  }, [
+    backtestPortfolioAssets,
+    backtestTrades,
+    liveTrades,
+    selectedSetup,
+    activePortfolioAssetSet,
+  ]);
 
   const applySearchAndSubFilters = (
     list: TradeRecord[],
@@ -1238,7 +1410,7 @@ export function App() {
   };
 
   const dashboardExecutionDeltaR = roundTo(
-    liveStats.netR - dashboardBacktestStats.netR,
+    dashboardLiveStats.netR - dashboardBacktestStats.netR,
     2,
   );
 
@@ -1675,8 +1847,134 @@ export function App() {
         {/* TAB 1: DASHBOARD & COMPARISON */}
         {activeTab === 'dashboard' ? (
           <div className="space-y-8">
+            {/* Multi-select Active Portfolio Assets Toggle Bar (Persisted in Firebase) */}
+            {backtestPortfolioAssets.length > 0 ? (
+              <section
+                aria-label="Active Portfolio Assets"
+                className="rounded-lg border border-[#1E2634] bg-[#121721] px-4 py-3.5"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-xs font-semibold text-slate-200">
+                      Active Portfolio Assets
+                    </span>
+                    <span className="rounded border border-[#263042] bg-[#0B0E14] px-2 py-0.5 font-mono text-[11px] text-sky-300 tabular-nums">
+                      {
+                        backtestPortfolioAssets.filter((a) =>
+                          activePortfolioAssetSet.has(a),
+                        ).length
+                      }
+                      /{backtestPortfolioAssets.length}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={handleSelectAllPortfolioAssets}
+                      className="rounded border border-[#263042] bg-[#0B0E14] px-2.5 py-1 font-medium text-slate-300 transition-colors hover:border-sky-500/50 hover:text-white"
+                    >
+                      {lang === 'en' ? 'Select all' : 'Seleziona tutti'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleClearPortfolioAssets}
+                      className="rounded border border-[#263042] bg-[#0B0E14] px-2.5 py-1 font-medium text-slate-400 transition-colors hover:border-rose-500/40 hover:text-rose-300"
+                    >
+                      {lang === 'en' ? 'Clear' : 'Deseleziona tutti'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                  {backtestPortfolioAssets.map((asset) => {
+                    const checked = activePortfolioAssetSet.has(asset);
+                    return (
+                      <button
+                        key={asset}
+                        type="button"
+                        role="checkbox"
+                        aria-checked={checked}
+                        onClick={() =>
+                          handleTogglePortfolioAsset(asset, backtestPortfolioAssets)
+                        }
+                        className={`inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 font-mono text-xs font-medium transition-colors whitespace-nowrap ${
+                          checked
+                            ? 'border-sky-500/60 bg-sky-500/15 text-sky-200'
+                            : 'border-[#1E2634] bg-[#0B0E14] text-slate-400 hover:border-slate-600 hover:text-slate-200'
+                        }`}
+                      >
+                        <span
+                          className={`flex h-3.5 w-3.5 items-center justify-center rounded-xs border ${
+                            checked
+                              ? 'border-sky-400 bg-sky-500 text-[#0B0E14]'
+                              : 'border-slate-600 bg-transparent'
+                          }`}
+                        >
+                          {checked ? <Check className="h-2.5 w-2.5 stroke-[3]" /> : null}
+                        </span>
+                        <span>{asset}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+            ) : null}
+
+            {/* Portfolio Rotation Alert Banner (Last 30 Days vs Latest DB Trade Date) */}
+            {portfolioRotationAlert ? (
+              <section
+                role="status"
+                aria-label="Portfolio Rotation Alert"
+                className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3.5"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="space-y-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-semibold text-amber-200">
+                        🚀 Opportunità Rotazione: {portfolioRotationAlert.opportunities[0].asset} (
+                        {formatR(portfolioRotationAlert.opportunities[0].netR)} negli ultimi 30gg) sta
+                        sovraperformando {portfolioRotationAlert.opportunities[0].comparedAsset} (
+                        {formatR(portfolioRotationAlert.opportunities[0].comparedNetR)})
+                      </span>
+                      <span className="rounded border border-amber-500/30 bg-[#0B0E14]/70 px-2 py-0.5 font-mono text-[10px] text-amber-300/90 tabular-nums">
+                        {formatDisplayDate(portfolioRotationAlert.windowStart)} →{' '}
+                        {formatDisplayDate(portfolioRotationAlert.latestDate)}
+                      </span>
+                    </div>
+
+                    {portfolioRotationAlert.opportunities.length > 1 ? (
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-amber-100/85">
+                        {portfolioRotationAlert.opportunities.slice(1).map((opp) => (
+                          <span key={opp.asset} className="font-mono">
+                            • {opp.asset} ({formatR(opp.netR)}) &gt; {opp.comparedAsset} (
+                            {formatR(opp.comparedNetR)})
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {portfolioRotationAlert.opportunities.map((opp) => (
+                      <button
+                        key={opp.asset}
+                        type="button"
+                        onClick={() =>
+                          handleTogglePortfolioAsset(opp.asset, backtestPortfolioAssets)
+                        }
+                        className="rounded border border-amber-400/40 bg-[#0B0E14]/80 px-2.5 py-1 font-mono text-[11px] font-medium text-amber-200 transition-colors hover:border-amber-300 hover:bg-amber-500/20 whitespace-nowrap"
+                      >
+                        + Attiva {opp.asset}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </section>
+            ) : null}
+
             {/* Prominent Dedicated Akinator Backtest-Only KPI Card at Very Top */}
-            <AkinatorCard scan={akinatorScan} t={t} />
+            <AkinatorCard scan={dashboardAkinatorScan} t={t} />
 
             {/* Comparison KPI Strip */}
             <section className="space-y-3">
@@ -1776,17 +2074,17 @@ export function App() {
                   </div>
                   <div
                     className={`mt-2 font-mono text-2xl font-bold tabular-nums ${
-                      liveStats.netR >= 0 ? 'text-sky-400' : 'text-rose-400'
+                      dashboardLiveStats.netR >= 0 ? 'text-sky-400' : 'text-rose-400'
                     }`}
                   >
-                    {formatR(liveStats.netR)}
+                    {formatR(dashboardLiveStats.netR)}
                   </div>
                   <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
-                    {liveStats.totalTrades} trades · {liveStats.winRatePct.toFixed(1)}% WR
+                    {dashboardLiveStats.totalTrades} trades · {dashboardLiveStats.winRatePct.toFixed(1)}% WR
                   </div>
                   <div className="mt-1 font-mono text-[11px] text-slate-500 tabular-nums">
-                    {liveStats.wins} TP · {liveStats.losses} SL ·{' '}
-                    {liveStats.breakevens} BE · {liveStats.unfilled} UF
+                    {dashboardLiveStats.wins} TP · {dashboardLiveStats.losses} SL ·{' '}
+                    {dashboardLiveStats.breakevens} BE · {dashboardLiveStats.unfilled} UF
                   </div>
                 </div>
 
@@ -1802,7 +2100,7 @@ export function App() {
                     {formatR(dashboardExecutionDeltaR)}
                   </div>
                   <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
-                    {t.dashboard.liveSeries}: {formatR(liveStats.netR)} · {t.dashboard.backtestSeries}:{' '}
+                    {t.dashboard.liveSeries}: {formatR(dashboardLiveStats.netR)} · {t.dashboard.backtestSeries}:{' '}
                     {formatR(dashboardBacktestStats.netR)}
                   </div>
                 </div>
@@ -1816,19 +2114,19 @@ export function App() {
               selectedSetup={selectedSetup}
               rangeMode={dashboardRangeMode}
               liveStartDate={liveStartDate}
-              liveStats={liveStats}
+              liveStats={dashboardLiveStats}
               backtestStats={dashboardBacktestStats}
-              liveTrades={filteredLive}
+              liveTrades={dashboardPortfolioLive}
               backtestTrades={dashboardBacktestTrades}
               missedTrades={
                 isLiveAligned && liveStartDate
-                  ? filteredMissed.filter((tr) => {
+                  ? dashboardPortfolioMissed.filter((tr) => {
                       const assetStart =
                         liveStartDateByAsset.get(tr.asset.trim().toUpperCase()) ??
                         liveStartDate;
                       return tr.date >= assetStart;
                     })
-                  : filteredMissed
+                  : dashboardPortfolioMissed
               }
             />
 
@@ -1851,7 +2149,7 @@ export function App() {
               secondarySeries={{
                 label: t.dashboard.liveSeries,
                 color: '#38BDF8',
-                stats: liveStats,
+                stats: dashboardLiveStats,
               }}
             />
 
@@ -1893,10 +2191,10 @@ export function App() {
                         </div>
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        <div>{liveStats.totalTrades}</div>
+                        <div>{dashboardLiveStats.totalTrades}</div>
                         <div className="mt-0.5 text-[10px] text-slate-400">
-                          {liveStats.wins} TP · {liveStats.losses} SL ·{' '}
-                          {liveStats.breakevens} BE · {liveStats.unfilled} UF
+                          {dashboardLiveStats.wins} TP · {dashboardLiveStats.losses} SL ·{' '}
+                          {dashboardLiveStats.breakevens} BE · {dashboardLiveStats.unfilled} UF
                         </div>
                       </td>
                     </tr>
@@ -1908,7 +2206,7 @@ export function App() {
                         {dashboardBacktestStats.winRatePct.toFixed(1)}%
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        {liveStats.winRatePct.toFixed(1)}%
+                        {dashboardLiveStats.winRatePct.toFixed(1)}%
                       </td>
                     </tr>
                     <tr>
@@ -1919,7 +2217,7 @@ export function App() {
                         {formatR(dashboardBacktestStats.netR)}
                       </td>
                       <td className="px-5 py-3 text-right font-semibold text-sky-400">
-                        {formatR(liveStats.netR)}
+                        {formatR(dashboardLiveStats.netR)}
                       </td>
                     </tr>
                     <tr>
@@ -1930,7 +2228,7 @@ export function App() {
                         {formatR(dashboardBacktestStats.expectancyR)}
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        {formatR(liveStats.expectancyR)}
+                        {formatR(dashboardLiveStats.expectancyR)}
                       </td>
                     </tr>
                     <tr>
@@ -1941,7 +2239,7 @@ export function App() {
                         -{dashboardBacktestStats.maxDrawdownR.toFixed(2)} R
                       </td>
                       <td className="px-5 py-3 text-right text-rose-400">
-                        -{liveStats.maxDrawdownR.toFixed(2)} R
+                        -{dashboardLiveStats.maxDrawdownR.toFixed(2)} R
                       </td>
                     </tr>
                     <tr>
@@ -1954,7 +2252,7 @@ export function App() {
                           : dashboardBacktestStats.profitFactor.toFixed(2)}
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        {liveStats.profitFactorInfinite ? 'Max' : liveStats.profitFactor.toFixed(2)}
+                        {dashboardLiveStats.profitFactorInfinite ? 'Max' : dashboardLiveStats.profitFactor.toFixed(2)}
                       </td>
                     </tr>
                     <tr>
@@ -1967,7 +2265,7 @@ export function App() {
                           : `${dashboardBacktestStats.payoffRatio.toFixed(2)} : 1`}
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        {liveStats.payoffRatio === null ? 'Max' : `${liveStats.payoffRatio.toFixed(2)} : 1`}
+                        {dashboardLiveStats.payoffRatio === null ? 'Max' : `${dashboardLiveStats.payoffRatio.toFixed(2)} : 1`}
                       </td>
                     </tr>
                     <tr>
@@ -1986,11 +2284,11 @@ export function App() {
                             : '0.00'}
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        {liveStats.sharpeRatio !== null ? liveStats.sharpeRatio.toFixed(2) : '0.00'} /{' '}
-                        {liveStats.sortinoInfinite
+                        {dashboardLiveStats.sharpeRatio !== null ? dashboardLiveStats.sharpeRatio.toFixed(2) : '0.00'} /{' '}
+                        {dashboardLiveStats.sortinoInfinite
                           ? 'Max'
-                          : liveStats.sortinoRatio !== null
-                            ? liveStats.sortinoRatio.toFixed(2)
+                          : dashboardLiveStats.sortinoRatio !== null
+                            ? dashboardLiveStats.sortinoRatio.toFixed(2)
                             : '0.00'}
                       </td>
                     </tr>
@@ -2008,8 +2306,8 @@ export function App() {
                           : 'Max'}
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
-                        {liveStats.calmarRatio !== null ? liveStats.calmarRatio.toFixed(2) : 'N/A'} /{' '}
-                        {liveStats.recoveryFactor !== null ? liveStats.recoveryFactor.toFixed(2) : 'Max'}
+                        {dashboardLiveStats.calmarRatio !== null ? dashboardLiveStats.calmarRatio.toFixed(2) : 'N/A'} /{' '}
+                        {dashboardLiveStats.recoveryFactor !== null ? dashboardLiveStats.recoveryFactor.toFixed(2) : 'Max'}
                       </td>
                     </tr>
                     <tr>
@@ -2020,7 +2318,7 @@ export function App() {
                         {dashboardBacktestStats.riskOfRuinPct.toFixed(2)}%
                       </td>
                       <td className="px-5 py-3 text-right text-sky-400">
-                        {liveStats.riskOfRuinPct.toFixed(2)}%
+                        {dashboardLiveStats.riskOfRuinPct.toFixed(2)}%
                       </td>
                     </tr>
                   </tbody>
@@ -2031,7 +2329,7 @@ export function App() {
             {/* Institutional Analytics Summary: Backtest vs. Journal Reale */}
             <InstitutionalMetricsPanel
               stats={dashboardBacktestStats}
-              comparisonStats={liveStats}
+              comparisonStats={dashboardLiveStats}
               primaryLabel={t.nav.backtest}
               comparisonLabel={t.nav.live}
               lang={lang}
