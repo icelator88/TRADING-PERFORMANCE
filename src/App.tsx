@@ -46,19 +46,26 @@ import {
   roundTo,
 } from './utils/calculations';
 import {
+  batchCreateMissedTradesInFirestore,
   batchCreateTradesInFirestore,
+  batchDeleteMissedTradesInFirestore,
   batchDeleteTradesInFirestore,
   type CloudUserSettings,
   deleteGoogleSheetSourceInFirestore,
+  deleteMissedTradeInFirestore,
   deleteTradeInFirestore,
   ensureUserProfile,
+  fetchUserMissedTradesFromFirestore,
   fetchUserTradesFromFirestore,
+  migrateLegacyMissedTradesFromTradesCollection,
   saveGoogleSheetSourceInFirestore,
   saveUserSettingsInFirestore,
   subscribeUserGoogleSheets,
+  subscribeUserMissedTrades,
   subscribeUserSettings,
   subscribeUserTrades,
   updateGoogleSheetSyncStatusInFirestore,
+  upsertMissedTradeInFirestore,
   upsertTradeInFirestore,
 } from './utils/firestoreSync';
 import { analizzaTradeConGemini, buildGeminiReviewPrompt } from './utils/geminiReview';
@@ -110,6 +117,7 @@ export function App() {
   const [deleteTarget, setDeleteTarget] = useState<TradeRecord | null>(null);
   const [deletingSingle, setDeletingSingle] = useState(false);
   const [resetSectionTarget, setResetSectionTarget] = useState<TradeCategory | null>(null);
+  const [resetConfirmStep, setResetConfirmStep] = useState<1 | 2>(1);
   const [resettingSection, setResettingSection] = useState(false);
 
   const [geminiState, setGeminiState] = useState({
@@ -131,6 +139,7 @@ export function App() {
   const [fatalError, setFatalError] = useState<Error | null>(null);
 
   const cloudIdsRef = useRef<Set<string>>(new Set());
+  const missedCloudIdsRef = useRef<Set<string>>(new Set());
   const settingsRef = useRef<CloudUserSettings>({
     language: lang,
     activeTab,
@@ -201,24 +210,25 @@ export function App() {
   const splitTradesByCategory = (all: TradeRecord[]) => {
     const bt: TradeRecord[] = [];
     const lv: TradeRecord[] = [];
-    const ms: TradeRecord[] = [];
     all.forEach((tr) => {
       if (tr.category === 'backtest') bt.push(tr);
-      else if (tr.category === 'missed') ms.push(tr);
-      else lv.push(tr);
+      else if (tr.category === 'live') lv.push(tr);
     });
-    return { bt, lv, ms };
+    return { bt, lv };
   };
 
   useEffect(() => {
     let active = true;
     let unsubTrades: (() => void) | null = null;
+    let unsubMissedTrades: (() => void) | null = null;
     let unsubSettings: (() => void) | null = null;
     let unsubSheets: (() => void) | null = null;
 
     const unsubAuth = onAuthStateChanged(auth, async (user) => {
       unsubTrades?.();
       unsubTrades = null;
+      unsubMissedTrades?.();
+      unsubMissedTrades = null;
       unsubSettings?.();
       unsubSettings = null;
       unsubSheets?.();
@@ -228,6 +238,7 @@ export function App() {
 
       if (!user) {
         cloudIdsRef.current.clear();
+        missedCloudIdsRef.current.clear();
         setBacktestTrades([]);
         setLiveTrades([]);
         setMissedTrades([]);
@@ -244,6 +255,7 @@ export function App() {
 
       try {
         await ensureUserProfile(user);
+        await migrateLegacyMissedTradesFromTradesCollection(user.uid);
       } catch (err) {
         if (active) {
           setFatalError(err instanceof Error ? err : new Error(String(err)));
@@ -290,10 +302,21 @@ export function App() {
           if (!active) return;
 
           cloudIdsRef.current = new Set(cloudTrades.map((tr) => tr.id));
-          const { bt, lv, ms } = splitTradesByCategory(cloudTrades);
+          const { bt, lv } = splitTradesByCategory(cloudTrades);
           setBacktestTrades(bt);
           setLiveTrades(lv);
-          setMissedTrades(ms);
+          setCloudSyncStatus('synced');
+        },
+        (err) => {
+          if (active) setFatalError(err);
+        },
+      );
+      unsubMissedTrades = subscribeUserMissedTrades(
+        user.uid,
+        (cloudMissed) => {
+          if (!active) return;
+          missedCloudIdsRef.current = new Set(cloudMissed.map((tr) => tr.id));
+          setMissedTrades(cloudMissed);
           setCloudSyncStatus('synced');
         },
         (err) => {
@@ -314,6 +337,7 @@ export function App() {
     return () => {
       active = false;
       unsubTrades?.();
+      unsubMissedTrades?.();
       unsubSettings?.();
       unsubSheets?.();
       unsubAuth();
@@ -345,11 +369,14 @@ export function App() {
   }, []);
 
   const availableAssets = useMemo(() => {
-    const all = [...backtestTrades, ...liveTrades, ...missedTrades];
+    const sourcePool =
+      activeTab === 'missed'
+        ? missedTrades
+        : [...backtestTrades, ...liveTrades];
     return Array.from(
-      new Set(all.map((tr) => tr.asset.trim().toUpperCase()).filter(Boolean)),
+      new Set(sourcePool.map((tr) => tr.asset.trim().toUpperCase()).filter(Boolean)),
     ).sort();
-  }, [backtestTrades, liveTrades, missedTrades]);
+  }, [activeTab, backtestTrades, liveTrades, missedTrades]);
 
   const filterBySetupAndAsset = (list: TradeRecord[]) => {
     return list.filter((tr) => {
@@ -409,7 +436,22 @@ export function App() {
     [filteredMissed],
   );
 
-  // Earliest live trade date in Journal Reale (YYYY-MM-DD) for aligned Dashboard comparison
+  // Earliest live trade date per asset in Journal Reale (YYYY-MM-DD) for aligned Dashboard comparison
+  const liveStartDateByAsset = useMemo(() => {
+    const earliestByAsset = new Map<string, string>();
+    liveTrades.forEach((tr) => {
+      if (tr.category !== 'live') return;
+      const assetKey = tr.asset.trim().toUpperCase();
+      if (!assetKey || !/^\d{4}-\d{2}-\d{2}$/.test(tr.date)) return;
+      const currentEarliest = earliestByAsset.get(assetKey);
+      if (!currentEarliest || tr.date < currentEarliest) {
+        earliestByAsset.set(assetKey, tr.date);
+      }
+    });
+    return earliestByAsset;
+  }, [liveTrades]);
+
+  // Earliest visible live trade date (YYYY-MM-DD) for shared EquityChart timeline & header badge
   const liveStartDate = useMemo(() => {
     const validFilteredDates = filteredLive
       .map((tr) => tr.date)
@@ -420,29 +462,19 @@ export function App() {
         validFilteredDates[0],
       );
     }
-    const validAllLiveDates = liveTrades
-      .filter((tr) => tr.category === 'live')
-      .map((tr) => tr.date)
-      .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
-    if (validAllLiveDates.length > 0) {
-      return validAllLiveDates.reduce(
-        (min, d) => (d < min ? d : min),
-        validAllLiveDates[0],
-      );
-    }
     return null;
-  }, [filteredLive, liveTrades]);
+  }, [filteredLive]);
 
-  const isLiveAligned =
-    dashboardRangeMode === 'live_period' && liveStartDate !== null;
+  const isLiveAligned = dashboardRangeMode === 'live_period';
 
-  const dashboardBacktestTrades = useMemo(
-    () =>
-      isLiveAligned && liveStartDate
-        ? filteredBacktest.filter((tr) => tr.date >= liveStartDate)
-        : filteredBacktest,
-    [filteredBacktest, isLiveAligned, liveStartDate],
-  );
+  const dashboardBacktestTrades = useMemo(() => {
+    if (!isLiveAligned) return filteredBacktest;
+    return filteredBacktest.filter((tr) => {
+      const assetKey = tr.asset.trim().toUpperCase();
+      const assetLiveStart = liveStartDateByAsset.get(assetKey);
+      return assetLiveStart !== undefined && tr.date >= assetLiveStart;
+    });
+  }, [filteredBacktest, isLiveAligned, liveStartDateByAsset]);
 
   const dashboardBacktestStats = useMemo(
     () => calculatePerformanceStats(dashboardBacktestTrades),
@@ -478,9 +510,27 @@ export function App() {
       throw new Error('Devi essere autenticato per salvare su Firebase.');
     }
 
-    const isExistingInCloud = cloudIdsRef.current.has(saved.id);
-    await upsertTradeInFirestore(firebaseUser.uid, saved, isExistingInCloud);
-    cloudIdsRef.current.add(saved.id);
+    if (saved.category === 'missed') {
+      const isExistingMissed = missedCloudIdsRef.current.has(saved.id);
+      await upsertMissedTradeInFirestore(firebaseUser.uid, saved, isExistingMissed);
+      missedCloudIdsRef.current.add(saved.id);
+      if (
+        previousCategory &&
+        previousCategory !== 'missed' &&
+        cloudIdsRef.current.has(saved.id)
+      ) {
+        await deleteTradeInFirestore(firebaseUser.uid, saved.id);
+        cloudIdsRef.current.delete(saved.id);
+      }
+    } else {
+      const isExistingInCloud = cloudIdsRef.current.has(saved.id);
+      await upsertTradeInFirestore(firebaseUser.uid, saved, isExistingInCloud);
+      cloudIdsRef.current.add(saved.id);
+      if (previousCategory === 'missed' && missedCloudIdsRef.current.has(saved.id)) {
+        await deleteMissedTradeInFirestore(firebaseUser.uid, saved.id);
+        missedCloudIdsRef.current.delete(saved.id);
+      }
+    }
 
     let nextBt = backtestTrades;
     let nextLive = liveTrades;
@@ -521,15 +571,19 @@ export function App() {
     const targetToDelete = deleteTarget;
     setDeletingSingle(true);
     try {
-      await deleteTradeInFirestore(firebaseUser.uid, targetToDelete.id);
-      cloudIdsRef.current.delete(targetToDelete.id);
-
-      if (targetToDelete.category === 'backtest') {
-        setBacktestTrades((prev) => prev.filter((x) => x.id !== targetToDelete.id));
-      } else if (targetToDelete.category === 'live') {
-        setLiveTrades((prev) => prev.filter((x) => x.id !== targetToDelete.id));
-      } else {
+      if (targetToDelete.category === 'missed') {
+        await deleteMissedTradeInFirestore(firebaseUser.uid, targetToDelete.id);
+        missedCloudIdsRef.current.delete(targetToDelete.id);
         setMissedTrades((prev) => prev.filter((x) => x.id !== targetToDelete.id));
+      } else {
+        await deleteTradeInFirestore(firebaseUser.uid, targetToDelete.id);
+        cloudIdsRef.current.delete(targetToDelete.id);
+
+        if (targetToDelete.category === 'backtest') {
+          setBacktestTrades((prev) => prev.filter((x) => x.id !== targetToDelete.id));
+        } else {
+          setLiveTrades((prev) => prev.filter((x) => x.id !== targetToDelete.id));
+        }
       }
       setDeleteTarget(null);
     } catch (err) {
@@ -547,8 +601,12 @@ export function App() {
 
     let existingPool: TradeRecord[] = [];
     try {
-      const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
-      existingPool = dbTrades.filter((tr) => tr.category === importCategory);
+      if (importCategory === 'missed') {
+        existingPool = await fetchUserMissedTradesFromFirestore(firebaseUser.uid);
+      } else {
+        const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
+        existingPool = dbTrades.filter((tr) => tr.category === importCategory);
+      }
     } catch (err) {
       setFatalError(err instanceof Error ? err : new Error(String(err)));
       return;
@@ -588,8 +646,13 @@ export function App() {
       }
 
       try {
-        await batchCreateTradesInFirestore(firebaseUser.uid, tradesToSyncCloud);
-        tradesToSyncCloud.forEach((tr) => cloudIdsRef.current.add(tr.id));
+        if (importCategory === 'missed') {
+          await batchCreateMissedTradesInFirestore(firebaseUser.uid, tradesToSyncCloud);
+          tradesToSyncCloud.forEach((tr) => missedCloudIdsRef.current.add(tr.id));
+        } else {
+          await batchCreateTradesInFirestore(firebaseUser.uid, tradesToSyncCloud);
+          tradesToSyncCloud.forEach((tr) => cloudIdsRef.current.add(tr.id));
+        }
       } catch (err) {
         setFatalError(err instanceof Error ? err : new Error(String(err)));
         return;
@@ -704,10 +767,14 @@ export function App() {
       }
     });
 
-    const newForCloud = [...addedBt, ...addedLive, ...addedMissed];
-    if (firebaseUser && newForCloud.length > 0) {
-      newForCloud.forEach((tr) => cloudIdsRef.current.add(tr.id));
-      await batchCreateTradesInFirestore(firebaseUser.uid, newForCloud);
+    const newMainTradesForCloud = [...addedBt, ...addedLive];
+    if (firebaseUser && newMainTradesForCloud.length > 0) {
+      newMainTradesForCloud.forEach((tr) => cloudIdsRef.current.add(tr.id));
+      await batchCreateTradesInFirestore(firebaseUser.uid, newMainTradesForCloud);
+    }
+    if (firebaseUser && addedMissed.length > 0) {
+      addedMissed.forEach((tr) => missedCloudIdsRef.current.add(tr.id));
+      await batchCreateMissedTradesInFirestore(firebaseUser.uid, addedMissed);
     }
 
     const summaryMsg =
@@ -757,25 +824,28 @@ export function App() {
 
     if (firebaseUser) {
       try {
-        const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
-        const byIdBt = new Map<string, TradeRecord>();
-        const byIdLv = new Map<string, TradeRecord>();
-        const byIdMissed = new Map<string, TradeRecord>();
-        dbTrades.forEach((tr) => {
-          if (tr.category === 'backtest') {
-            byIdBt.set(tr.id, tr);
-          } else if (tr.category === 'missed') {
-            byIdMissed.set(tr.id, tr);
-          } else {
-            byIdLv.set(tr.id, tr);
-          }
-        });
-        btPool.forEach((tr) => byIdBt.set(tr.id, tr));
-        livePool.forEach((tr) => byIdLv.set(tr.id, tr));
-        missedPool.forEach((tr) => byIdMissed.set(tr.id, tr));
-        btPool.splice(0, btPool.length, ...byIdBt.values());
-        livePool.splice(0, livePool.length, ...byIdLv.values());
-        missedPool.splice(0, missedPool.length, ...byIdMissed.values());
+        if (source.category === 'missed') {
+          const dbMissed = await fetchUserMissedTradesFromFirestore(firebaseUser.uid);
+          const byIdMissed = new Map<string, TradeRecord>();
+          dbMissed.forEach((tr) => byIdMissed.set(tr.id, tr));
+          missedPool.forEach((tr) => byIdMissed.set(tr.id, tr));
+          missedPool.splice(0, missedPool.length, ...byIdMissed.values());
+        } else {
+          const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
+          const byIdBt = new Map<string, TradeRecord>();
+          const byIdLv = new Map<string, TradeRecord>();
+          dbTrades.forEach((tr) => {
+            if (tr.category === 'backtest') {
+              byIdBt.set(tr.id, tr);
+            } else if (tr.category === 'live') {
+              byIdLv.set(tr.id, tr);
+            }
+          });
+          btPool.forEach((tr) => byIdBt.set(tr.id, tr));
+          livePool.forEach((tr) => byIdLv.set(tr.id, tr));
+          btPool.splice(0, btPool.length, ...byIdBt.values());
+          livePool.splice(0, livePool.length, ...byIdLv.values());
+        }
       } catch (err) {
         const message =
           err instanceof Error ? err.message : 'Errore di lettura da Firebase.';
@@ -839,19 +909,21 @@ export function App() {
 
     if (firebaseUser) {
       try {
-        const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
+        const [dbTrades, dbMissed] = await Promise.all([
+          fetchUserTradesFromFirestore(firebaseUser.uid),
+          fetchUserMissedTradesFromFirestore(firebaseUser.uid),
+        ]);
         const byIdBt = new Map<string, TradeRecord>();
         const byIdLv = new Map<string, TradeRecord>();
         const byIdMissed = new Map<string, TradeRecord>();
         dbTrades.forEach((tr) => {
           if (tr.category === 'backtest') {
             byIdBt.set(tr.id, tr);
-          } else if (tr.category === 'missed') {
-            byIdMissed.set(tr.id, tr);
-          } else {
+          } else if (tr.category === 'live') {
             byIdLv.set(tr.id, tr);
           }
         });
+        dbMissed.forEach((tr) => byIdMissed.set(tr.id, tr));
         btPool.forEach((tr) => byIdBt.set(tr.id, tr));
         livePool.forEach((tr) => byIdLv.set(tr.id, tr));
         missedPool.forEach((tr) => byIdMissed.set(tr.id, tr));
@@ -941,7 +1013,7 @@ export function App() {
           ? ['live']
           : activeTab === 'missed'
             ? ['missed']
-            : ['backtest', 'live', 'missed'];
+            : ['backtest', 'live'];
 
     const sectionLabel =
       activeTab === 'backtest'
@@ -950,20 +1022,23 @@ export function App() {
           ? 'Journal Reale'
           : activeTab === 'missed'
             ? 'Trade Non Presi'
-            : 'Tutte le sezioni';
+            : 'Dashboard (Backtest & Journal Reale)';
 
     try {
-      let sourceTrades: TradeRecord[] = [
-        ...backtestTrades,
-        ...liveTrades,
-        ...missedTrades,
-      ];
+      let sourceMainTrades: TradeRecord[] = [...backtestTrades, ...liveTrades];
+      let sourceMissedTrades: TradeRecord[] = [...missedTrades];
 
       if (firebaseUser) {
-        sourceTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
+        if (targetCategories.includes('missed')) {
+          sourceMissedTrades = await fetchUserMissedTradesFromFirestore(firebaseUser.uid);
+        }
+        if (targetCategories.includes('backtest') || targetCategories.includes('live')) {
+          sourceMainTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
+        }
       }
 
-      const duplicateIds: string[] = [];
+      const mainDuplicateIds: string[] = [];
+      const missedDuplicateIds: string[] = [];
       const keptByCategory: Record<TradeCategory, TradeRecord[]> = {
         backtest: [...backtestTrades],
         live: [...liveTrades],
@@ -971,7 +1046,8 @@ export function App() {
       };
 
       targetCategories.forEach((cat) => {
-        const catTrades = sourceTrades
+        const pool = cat === 'missed' ? sourceMissedTrades : sourceMainTrades;
+        const catTrades = pool
           .filter((tr) => tr.category === cat)
           .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
 
@@ -980,7 +1056,11 @@ export function App() {
         catTrades.forEach((tr) => {
           const sig = buildTradeCoreDuplicateKey(tr);
           if (seen.has(sig)) {
-            duplicateIds.push(tr.id);
+            if (cat === 'missed') {
+              missedDuplicateIds.push(tr.id);
+            } else {
+              mainDuplicateIds.push(tr.id);
+            }
           } else {
             seen.add(sig);
             unique.push(tr);
@@ -989,7 +1069,8 @@ export function App() {
         keptByCategory[cat] = unique;
       });
 
-      if (duplicateIds.length === 0) {
+      const totalDuplicates = mainDuplicateIds.length + missedDuplicateIds.length;
+      if (totalDuplicates === 0) {
         showToast(
           lang === 'en'
             ? `No duplicates found in ${sectionLabel}.`
@@ -1002,8 +1083,14 @@ export function App() {
       }
 
       if (firebaseUser) {
-        await batchDeleteTradesInFirestore(firebaseUser.uid, duplicateIds);
-        duplicateIds.forEach((id) => cloudIdsRef.current.delete(id));
+        if (mainDuplicateIds.length > 0) {
+          await batchDeleteTradesInFirestore(firebaseUser.uid, mainDuplicateIds);
+          mainDuplicateIds.forEach((id) => cloudIdsRef.current.delete(id));
+        }
+        if (missedDuplicateIds.length > 0) {
+          await batchDeleteMissedTradesInFirestore(firebaseUser.uid, missedDuplicateIds);
+          missedDuplicateIds.forEach((id) => missedCloudIdsRef.current.delete(id));
+        }
       }
 
       if (targetCategories.includes('backtest')) {
@@ -1023,10 +1110,10 @@ export function App() {
 
       showToast(
         lang === 'en'
-          ? `Cleanup complete (${sectionLabel}): ${duplicateIds.length} duplicates removed from Firebase (${remainingCount} unique trades kept)`
+          ? `Cleanup complete (${sectionLabel}): ${totalDuplicates} duplicates removed from Firebase (${remainingCount} unique trades kept)`
           : lang === 'es'
-            ? `Limpieza completada (${sectionLabel}): ${duplicateIds.length} duplicados eliminados de Firebase (${remainingCount} trades únicos conservados)`
-            : `Pulizia completata (${sectionLabel}): ${duplicateIds.length} duplicati rimossi da Firebase (${remainingCount} trade unici mantenuti)`,
+            ? `Limpieza completada (${sectionLabel}): ${totalDuplicates} duplicados eliminados de Firebase (${remainingCount} trades únicos conservados)`
+            : `Pulizia completata (${sectionLabel}): ${totalDuplicates} duplicati rimossi da Firebase (${remainingCount} trade unici mantenuti)`,
         9000,
       );
     } catch (err) {
@@ -1042,6 +1129,8 @@ export function App() {
   const handleConfirmResetSection = async () => {
     if (!resetSectionTarget || resettingSection || !firebaseUser) return;
     const targetCategory = resetSectionTarget;
+    const targetAsset = assetFilter.trim().toUpperCase();
+    const isAllAssets = targetAsset === 'ALL';
     const sectionLabel = getSectionDisplayName(targetCategory);
     setResettingSection(true);
 
@@ -1053,48 +1142,72 @@ export function App() {
             ? liveTrades
             : missedTrades;
 
-      const idsSet = new Set<string>(localSectionTrades.map((tr) => tr.id));
+      const matchesAssetFilter = (tr: TradeRecord) =>
+        isAllAssets || tr.asset.trim().toUpperCase() === targetAsset;
 
-      const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
-      dbTrades.forEach((tr) => {
-        if (tr.category === targetCategory) {
-          idsSet.add(tr.id);
-        }
-      });
+      const idsSet = new Set<string>(
+        localSectionTrades.filter(matchesAssetFilter).map((tr) => tr.id),
+      );
+
+      if (targetCategory === 'missed') {
+        const dbMissed = await fetchUserMissedTradesFromFirestore(firebaseUser.uid);
+        dbMissed.forEach((tr) => {
+          if (matchesAssetFilter(tr)) {
+            idsSet.add(tr.id);
+          }
+        });
+      } else {
+        const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
+        dbTrades.forEach((tr) => {
+          if (tr.category === targetCategory && matchesAssetFilter(tr)) {
+            idsSet.add(tr.id);
+          }
+        });
+      }
 
       const idsToDelete = Array.from(idsSet);
 
       if (idsToDelete.length > 0) {
-        await batchDeleteTradesInFirestore(firebaseUser.uid, idsToDelete);
-        idsToDelete.forEach((id) => cloudIdsRef.current.delete(id));
+        if (targetCategory === 'missed') {
+          await batchDeleteMissedTradesInFirestore(firebaseUser.uid, idsToDelete);
+          idsToDelete.forEach((id) => missedCloudIdsRef.current.delete(id));
+        } else {
+          await batchDeleteTradesInFirestore(firebaseUser.uid, idsToDelete);
+          idsToDelete.forEach((id) => cloudIdsRef.current.delete(id));
+        }
       }
 
       if (targetCategory === 'backtest') {
-        setBacktestTrades([]);
+        setBacktestTrades((prev) => prev.filter((tr) => !idsSet.has(tr.id)));
       } else if (targetCategory === 'live') {
-        setLiveTrades([]);
+        setLiveTrades((prev) => prev.filter((tr) => !idsSet.has(tr.id)));
       } else {
-        setMissedTrades([]);
+        setMissedTrades((prev) => prev.filter((tr) => !idsSet.has(tr.id)));
       }
 
       setResetSectionTarget(null);
+      setResetConfirmStep(1);
+
+      const scopeLabel = isAllAssets
+        ? sectionLabel
+        : `${sectionLabel} · ${targetAsset}`;
 
       if (idsToDelete.length === 0) {
         showToast(
           lang === 'en'
-            ? `No trades to reset in ${sectionLabel}.`
+            ? `No trades to reset in ${scopeLabel}.`
             : lang === 'es'
-              ? `No hay operaciones para restablecer en ${sectionLabel}.`
-              : `Nessun trade presente da eliminare nella sezione ${sectionLabel}.`,
+              ? `No hay operaciones para restablecer en ${scopeLabel}.`
+              : `Nessun trade presente da eliminare in ${scopeLabel}.`,
           5000,
         );
       } else {
         showToast(
           lang === 'en'
-            ? `Reset complete (${sectionLabel}): ${idsToDelete.length} trades permanently deleted from Firebase.`
+            ? `Reset complete (${scopeLabel}): ${idsToDelete.length} trades permanently deleted from Firebase.`
             : lang === 'es'
-              ? `Restablecimiento completado (${sectionLabel}): ${idsToDelete.length} operaciones eliminadas permanentemente de Firebase.`
-              : `Reset completato (${sectionLabel}): ${idsToDelete.length} trade eliminati definitivamente da Firebase.`,
+              ? `Restablecimiento completado (${scopeLabel}): ${idsToDelete.length} operaciones eliminadas permanentemente de Firebase.`
+              : `Reset completato (${scopeLabel}): ${idsToDelete.length} trade eliminati definitivamente da Firebase.`,
           7000,
         );
       }
@@ -1426,9 +1539,10 @@ export function App() {
 
                     if (firebaseUser) {
                       try {
-                        const dbTrades = await fetchUserTradesFromFirestore(
-                          firebaseUser.uid,
-                        );
+                        const [dbTrades, dbMissed] = await Promise.all([
+                          fetchUserTradesFromFirestore(firebaseUser.uid),
+                          fetchUserMissedTradesFromFirestore(firebaseUser.uid),
+                        ]);
                         existingBtPool = mergeUniqueById(
                           dbTrades.filter((tr) => tr.category === 'backtest'),
                           existingBtPool,
@@ -1438,7 +1552,7 @@ export function App() {
                           existingLivePool,
                         );
                         existingMissedPool = mergeUniqueById(
-                          dbTrades.filter((tr) => tr.category === 'missed'),
+                          dbMissed,
                           existingMissedPool,
                         );
                       } catch (err) {
@@ -1464,7 +1578,11 @@ export function App() {
 
                     const addedBt = btDedup.addedTrades;
                     const addedLive = liveDedup.addedTrades;
-                    const addedMissed = missedDedup.addedTrades;
+                    const addedMissed = missedDedup.addedTrades.map((tr) => ({
+                      ...tr,
+                      category: 'missed' as const,
+                      isMissed: true,
+                    }));
                     const totalAdded =
                       addedBt.length + addedLive.length + addedMissed.length;
                     const totalSkipped =
@@ -1477,14 +1595,23 @@ export function App() {
                       return;
                     }
 
-                    const allNewToCloud = [...addedBt, ...addedLive, ...addedMissed];
-                    if (allNewToCloud.length > 0) {
+                    const mainNewToCloud = [...addedBt, ...addedLive];
+                    if (mainNewToCloud.length > 0 || addedMissed.length > 0) {
                       try {
-                        await batchCreateTradesInFirestore(
-                          firebaseUser.uid,
-                          allNewToCloud,
-                        );
-                        allNewToCloud.forEach((tr) => cloudIdsRef.current.add(tr.id));
+                        if (mainNewToCloud.length > 0) {
+                          await batchCreateTradesInFirestore(
+                            firebaseUser.uid,
+                            mainNewToCloud,
+                          );
+                          mainNewToCloud.forEach((tr) => cloudIdsRef.current.add(tr.id));
+                        }
+                        if (addedMissed.length > 0) {
+                          await batchCreateMissedTradesInFirestore(
+                            firebaseUser.uid,
+                            addedMissed,
+                          );
+                          addedMissed.forEach((tr) => missedCloudIdsRef.current.add(tr.id));
+                        }
                       } catch (err) {
                         setFatalError(
                           err instanceof Error ? err : new Error(String(err)),
@@ -1531,7 +1658,10 @@ export function App() {
               <button
                 type="button"
                 disabled={resettingSection}
-                onClick={() => setResetSectionTarget(activeTab)}
+                onClick={() => {
+                  setResetConfirmStep(1);
+                  setResetSectionTarget(activeTab);
+                }}
                 className="inline-flex items-center gap-2 rounded-md border border-rose-500/35 bg-rose-500/10 px-3.5 py-2 text-xs font-medium text-rose-300 transition-colors hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50 whitespace-nowrap shrink-0"
               >
                 <RotateCcw className="h-3.5 w-3.5" />
@@ -1874,11 +2004,13 @@ export function App() {
               </div>
             </section>
 
-            {/* Institutional Analytics Summary for Backtest */}
+            {/* Institutional Analytics Summary: Backtest vs. Journal Reale */}
             <InstitutionalMetricsPanel
               stats={dashboardBacktestStats}
+              comparisonStats={liveStats}
+              primaryLabel={t.nav.backtest}
+              comparisonLabel={t.nav.live}
               lang={lang}
-              titlePrefix={t.nav.backtest}
             />
           </div>
         ) : null}
@@ -2385,51 +2517,105 @@ export function App() {
 
       <ConfirmModal
         isOpen={resetSectionTarget !== null}
-        title={
-          resetSectionTarget
-            ? lang === 'en'
-              ? `Reset ${getSectionDisplayName(resetSectionTarget)}`
-              : lang === 'es'
-                ? `Restablecer ${getSectionDisplayName(resetSectionTarget)}`
-                : `Resetta ${getSectionDisplayName(resetSectionTarget)}`
-            : t.confirm.deleteTitle
-        }
+        title={(() => {
+          if (!resetSectionTarget) return t.confirm.deleteTitle;
+          const sectionName = getSectionDisplayName(resetSectionTarget);
+          const targetAsset = assetFilter.trim().toUpperCase();
+          if (targetAsset === 'ALL') {
+            if (lang === 'en') {
+              return `Reset ${sectionName} (Step ${resetConfirmStep}/2)`;
+            }
+            if (lang === 'es') {
+              return `Restablecer ${sectionName} (Paso ${resetConfirmStep}/2)`;
+            }
+            return `Resetta ${sectionName} (Conferma ${resetConfirmStep}/2)`;
+          }
+          if (lang === 'en') return `Reset ${sectionName} · ${targetAsset}`;
+          if (lang === 'es') return `Restablecer ${sectionName} · ${targetAsset}`;
+          return `Resetta ${sectionName} · ${targetAsset}`;
+        })()}
         message={(() => {
           if (!resetSectionTarget) return '';
           const sectionName = getSectionDisplayName(resetSectionTarget);
-          const count =
+          const targetAsset = assetFilter.trim().toUpperCase();
+          const isAllAssets = targetAsset === 'ALL';
+          const sectionList =
             resetSectionTarget === 'backtest'
-              ? backtestTrades.length
+              ? backtestTrades
               : resetSectionTarget === 'live'
-                ? liveTrades.length
-                : missedTrades.length;
+                ? liveTrades
+                : missedTrades;
+          const count = isAllAssets
+            ? sectionList.length
+            : sectionList.filter(
+                (tr) => tr.asset.trim().toUpperCase() === targetAsset,
+              ).length;
+
+          if (!isAllAssets) {
+            if (lang === 'en') {
+              return `Are you sure you want to permanently delete all ${count} trades for "${targetAsset}" in "${sectionName}" from Firebase? Trades for other assets and other sections will NOT be modified.`;
+            }
+            if (lang === 'es') {
+              return `¿Seguro que quieres eliminar permanentemente las ${count} operaciones de "${targetAsset}" en "${sectionName}" de Firebase? Los demás activos y secciones NO se modificarán.`;
+            }
+            return `Vuoi eliminare definitivamente tutti i ${count} trade di "${targetAsset}" nella sezione "${sectionName}" da Firebase? Gli altri asset e le altre sezioni non verranno modificati.`;
+          }
+
+          if (resetConfirmStep === 1) {
+            if (lang === 'en') {
+              return `Warning (1 of 2): ALL assets is selected. You are about to permanently delete ${count} trades in "${sectionName}" from Firebase. Other sections will NOT be modified. Continue to final confirmation?`;
+            }
+            if (lang === 'es') {
+              return `Atención (1 de 2): TODOS los activos está seleccionado. Estás a punto de eliminar permanentemente ${count} operaciones de "${sectionName}" de Firebase. Las demás secciones NO se modificarán. ¿Continuar a la confirmación final?`;
+            }
+            return `Attenzione (Conferma 1 di 2): è selezionato "Tutti gli Asset". Stai per eliminare definitivamente ${count} trade dalla sezione "${sectionName}" da Firebase. Le altre sezioni non verranno modificate. Vuoi procedere alla conferma finale?`;
+          }
+
           if (lang === 'en') {
-            return `Are you sure you want to permanently delete all ${count} trades in "${sectionName}" from Firebase? Trades in the other sections will NOT be modified.`;
+            return `Final Confirmation (2 of 2): Confirm permanent deletion of all ${count} trades in "${sectionName}" across ALL assets? This action cannot be undone.`;
           }
           if (lang === 'es') {
-            return `¿Seguro que quieres eliminar permanentemente las ${count} operaciones de "${sectionName}" de Firebase? Las operaciones de las demás secciones NO se modificarán.`;
+            return `Confirmación Final (2 de 2): ¿confirmas la eliminación permanente de las ${count} operaciones en "${sectionName}" de TODOS los activos? Esta acción no se puede deshacer.`;
           }
-          return `Vuoi eliminare definitivamente tutti i ${count} trade della sezione "${sectionName}" da Firebase? Le altre sezioni non verranno modificate.`;
+          return `Conferma Finale (2 di 2): confermi l'eliminazione definitiva di tutti i ${count} trade nella sezione "${sectionName}" (Tutti gli Asset)? Questa operazione è irreversibile.`;
         })()}
-        confirmLabel={
-          resettingSection
-            ? lang === 'en'
+        confirmLabel={(() => {
+          if (resettingSection) {
+            return lang === 'en'
               ? 'Deleting...'
               : lang === 'es'
                 ? 'Eliminando...'
-                : 'Eliminazione...'
-            : lang === 'en'
-              ? 'Delete Section Data'
+                : 'Eliminazione...';
+          }
+          const targetAsset = assetFilter.trim().toUpperCase();
+          if (targetAsset === 'ALL' && resetConfirmStep === 1) {
+            return lang === 'en'
+              ? 'Continue (1/2)'
               : lang === 'es'
-                ? 'Eliminar Sección'
-                : 'Elimina Sezione'
-        }
+                ? 'Continuar (1/2)'
+                : 'Continua (1/2)';
+          }
+          return lang === 'en'
+            ? 'Delete Permanently'
+            : lang === 'es'
+              ? 'Eliminar Definitivamente'
+              : 'Elimina Definitivamente';
+        })()}
         isBusy={resettingSection}
         t={t}
         onCancel={() => {
-          if (!resettingSection) setResetSectionTarget(null);
+          if (!resettingSection) {
+            setResetSectionTarget(null);
+            setResetConfirmStep(1);
+          }
         }}
-        onConfirm={() => void handleConfirmResetSection()}
+        onConfirm={() => {
+          if (assetFilter.trim().toUpperCase() === 'ALL' && resetConfirmStep === 1) {
+            setResetConfirmStep(2);
+            return;
+          }
+          void handleConfirmResetSection();
+        }}
       />
 
       <GeminiModal

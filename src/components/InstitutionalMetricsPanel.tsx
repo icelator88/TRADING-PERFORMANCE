@@ -5,6 +5,9 @@ import { formatPct, formatR } from '../utils/calculations';
 
 interface InstitutionalMetricsPanelProps {
   stats: PerformanceStats;
+  comparisonStats?: PerformanceStats;
+  primaryLabel?: string;
+  comparisonLabel?: string;
   lang: Language;
   titlePrefix?: string;
 }
@@ -26,6 +29,7 @@ function MetricTooltip({ text }: MetricTooltipProps) {
 
 const LABELS = {
   it: {
+    metricCol: 'Metrica',
     cardA: 'Redditività & Expectancy',
     grossWin: 'Profitto Lordo (Win)',
     tipGrossWin: 'Somma dei multipli R realizzati su tutte le operazioni chiuse in profitto (> 0 R).',
@@ -76,6 +80,7 @@ const LABELS = {
     tradesLabel: 'trade',
   },
   en: {
+    metricCol: 'Metric',
     cardA: 'Profitability & Expectancy',
     grossWin: 'Gross Profit (Wins)',
     tipGrossWin: 'Sum of realized R-multiples across all winning trades (> 0 R).',
@@ -192,8 +197,73 @@ function formatPeriodLabels(
   };
 }
 
+function formatStatsDisplay(s: PerformanceStats, compact = false) {
+  const pfText = s.profitFactorInfinite
+    ? compact
+      ? 'Max'
+      : 'Max (0 Loss)'
+    : s.profitFactor.toFixed(2);
+
+  const payoffText =
+    s.payoffRatio === null
+      ? compact
+        ? 'Max'
+        : 'Max (0 Loss)'
+      : `${s.payoffRatio.toFixed(2)} : 1`;
+
+  const cagrText =
+    s.cagrPct !== null
+      ? formatPct(s.cagrPct)
+      : s.totalTrades > 0
+        ? 'N/A (<14d)'
+        : '0.00%';
+
+  const sharpeText = s.sharpeRatio !== null ? s.sharpeRatio.toFixed(2) : '0.00';
+
+  const sortinoText = s.sortinoInfinite
+    ? compact
+      ? 'Max'
+      : 'Max (0 Loss)'
+    : s.sortinoRatio !== null
+      ? s.sortinoRatio.toFixed(2)
+      : '0.00';
+
+  const calmarText =
+    s.calmarRatio !== null
+      ? s.calmarRatio.toFixed(2)
+      : s.cagrPct !== null && s.cagrPct > 0 && s.maxDrawdownPct === 0
+        ? compact
+          ? 'Max'
+          : 'Max (0 DD)'
+        : s.totalTrades > 0 && s.cagrPct === null
+          ? 'N/A (<14d)'
+          : '0.00';
+
+  const recoveryText =
+    s.recoveryFactor !== null
+      ? s.recoveryFactor.toFixed(2)
+      : s.netR > 0
+        ? compact
+          ? 'Max'
+          : 'Max (0 DD)'
+        : '0.00';
+
+  return {
+    pfText,
+    payoffText,
+    cagrText,
+    sharpeText,
+    sortinoText,
+    calmarText,
+    recoveryText,
+  };
+}
+
 export function InstitutionalMetricsPanel({
   stats,
+  comparisonStats,
+  primaryLabel = 'Backtest',
+  comparisonLabel = 'Journal Reale',
   lang,
   titlePrefix,
 }: InstitutionalMetricsPanelProps) {
@@ -206,56 +276,33 @@ export function InstitutionalMetricsPanel({
   } | null>(null);
 
   const l = lang === 'en' ? LABELS.en : LABELS.it;
-
-  const pfText = stats.profitFactorInfinite
-    ? 'Max (0 Loss)'
-    : stats.profitFactor.toFixed(2);
-
-  const payoffText =
-    stats.payoffRatio === null
-      ? 'Max (0 Loss)'
-      : `${stats.payoffRatio.toFixed(2)} : 1`;
-
-  const cagrText =
-    stats.cagrPct !== null
-      ? formatPct(stats.cagrPct)
-      : stats.totalTrades > 0
-        ? 'N/A (<14d)'
-        : '0.00%';
-
-  const sharpeText =
-    stats.sharpeRatio !== null ? stats.sharpeRatio.toFixed(2) : '0.00';
-
-  const sortinoText = stats.sortinoInfinite
-    ? 'Max (0 Loss)'
-    : stats.sortinoRatio !== null
-      ? stats.sortinoRatio.toFixed(2)
-      : '0.00';
-
-  const calmarText =
-    stats.calmarRatio !== null
-      ? stats.calmarRatio.toFixed(2)
-      : stats.cagrPct !== null && stats.cagrPct > 0 && stats.maxDrawdownPct === 0
-        ? 'Max (0 DD)'
-        : stats.totalTrades > 0 && stats.cagrPct === null
-          ? 'N/A (<14d)'
-          : '0.00';
-
-  const recoveryText =
-    stats.recoveryFactor !== null
-      ? stats.recoveryFactor.toFixed(2)
-      : stats.netR > 0
-        ? 'Max (0 DD)'
-        : '0.00';
+  const isComparison = Boolean(comparisonStats);
+  const primaryFmt = formatStatsDisplay(stats, isComparison);
+  const compFmt = comparisonStats ? formatStatsDisplay(comparisonStats, true) : null;
 
   const buckets = pnlMode === 'monthly' ? stats.monthlyBuckets : stats.dailyBuckets;
   const visibleBuckets = pnlMode === 'monthly' ? buckets : buckets.slice(-45);
   const maxAbsR = Math.max(1, ...visibleBuckets.map((b) => Math.abs(b.netR)));
 
+  const renderColumnHeaders = () => {
+    if (!isComparison) return null;
+    return (
+      <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 border-b border-[#1E2634] bg-[#0B0E14]/70 px-2 py-2 text-[11px] font-semibold text-slate-400 rounded-t">
+        <span>{l.metricCol}</span>
+        <span className="text-right text-emerald-300/90 whitespace-nowrap">{primaryLabel}</span>
+        <span className="text-right text-sky-300/90 whitespace-nowrap">{comparisonLabel}</span>
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-4">
       {/* 3 Bento Metric Cards */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+      <div
+        className={`grid grid-cols-1 gap-4 ${
+          isComparison ? 'xl:grid-cols-3' : 'lg:grid-cols-3'
+        }`}
+      >
         {/* Card A: Profitability & Expectancy */}
         <section className="rounded-lg border border-[#1E2634] bg-[#121721] p-5">
           <div className="mb-3 flex items-center justify-between border-b border-[#1E2634] pb-3">
@@ -265,78 +312,190 @@ export function InstitutionalMetricsPanel({
             </h3>
             <TrendingUp className="h-4 w-4 text-emerald-400" />
           </div>
-          <dl className="divide-y divide-[#1E2634] text-xs">
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.grossWin}</span>
-                <MetricTooltip text={l.tipGrossWin} />
-              </dt>
-              <dd className="font-mono font-semibold text-emerald-400 tabular-nums">
-                +{stats.grossWinR.toFixed(2)} R
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.grossLoss}</span>
-                <MetricTooltip text={l.tipGrossLoss} />
-              </dt>
-              <dd className="font-mono font-semibold text-rose-400 tabular-nums">
-                {stats.grossLossR > 0 ? `-${stats.grossLossR.toFixed(2)} R` : '0.00 R'}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.profitFactor}</span>
-                <MetricTooltip text={l.tipPf} />
-              </dt>
-              <dd
-                className={`font-mono font-semibold tabular-nums ${
-                  stats.profitFactorInfinite || stats.profitFactor >= 1.5
-                    ? 'text-emerald-400'
-                    : stats.profitFactor >= 1
-                      ? 'text-sky-400'
-                      : 'text-rose-400'
-                }`}
-              >
-                {pfText}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.expectancy}</span>
-                <MetricTooltip text={l.tipExp} />
-              </dt>
-              <dd
-                className={`font-mono font-semibold tabular-nums ${
-                  stats.expectancyR >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                }`}
-              >
-                {formatR(stats.expectancyR)}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.cagr}</span>
-                <MetricTooltip text={l.tipCagr} />
-              </dt>
-              <dd className="font-mono font-semibold text-slate-100 tabular-nums">
-                {cagrText}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.netReturn}</span>
-                <MetricTooltip text={l.tipNetRet} />
-              </dt>
-              <dd
-                className={`font-mono font-semibold tabular-nums ${
-                  stats.netReturnPct >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                }`}
-              >
-                {formatPct(stats.netReturnPct)}
-              </dd>
-            </div>
-          </dl>
+          {renderColumnHeaders()}
+          {comparisonStats && compFmt ? (
+            <dl className="divide-y divide-[#1E2634] text-xs">
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.grossWin}</span>
+                  <MetricTooltip text={l.tipGrossWin} />
+                </dt>
+                <dd className="text-right font-mono font-semibold text-emerald-400 tabular-nums whitespace-nowrap">
+                  +{stats.grossWinR.toFixed(2)} R
+                </dd>
+                <dd className="text-right font-mono font-semibold text-emerald-400 tabular-nums whitespace-nowrap">
+                  +{comparisonStats.grossWinR.toFixed(2)} R
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.grossLoss}</span>
+                  <MetricTooltip text={l.tipGrossLoss} />
+                </dt>
+                <dd className="text-right font-mono font-semibold text-rose-400 tabular-nums whitespace-nowrap">
+                  {stats.grossLossR > 0 ? `-${stats.grossLossR.toFixed(2)} R` : '0.00 R'}
+                </dd>
+                <dd className="text-right font-mono font-semibold text-rose-400 tabular-nums whitespace-nowrap">
+                  {comparisonStats.grossLossR > 0
+                    ? `-${comparisonStats.grossLossR.toFixed(2)} R`
+                    : '0.00 R'}
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.profitFactor}</span>
+                  <MetricTooltip text={l.tipPf} />
+                </dt>
+                <dd
+                  className={`text-right font-mono font-semibold tabular-nums whitespace-nowrap ${
+                    stats.profitFactorInfinite || stats.profitFactor >= 1.5
+                      ? 'text-emerald-400'
+                      : stats.profitFactor >= 1
+                        ? 'text-sky-400'
+                        : 'text-rose-400'
+                  }`}
+                >
+                  {primaryFmt.pfText}
+                </dd>
+                <dd
+                  className={`text-right font-mono font-semibold tabular-nums whitespace-nowrap ${
+                    comparisonStats.profitFactorInfinite || comparisonStats.profitFactor >= 1.5
+                      ? 'text-emerald-400'
+                      : comparisonStats.profitFactor >= 1
+                        ? 'text-sky-400'
+                        : 'text-rose-400'
+                  }`}
+                >
+                  {compFmt.pfText}
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.expectancy}</span>
+                  <MetricTooltip text={l.tipExp} />
+                </dt>
+                <dd
+                  className={`text-right font-mono font-semibold tabular-nums whitespace-nowrap ${
+                    stats.expectancyR >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                  }`}
+                >
+                  {formatR(stats.expectancyR)}
+                </dd>
+                <dd
+                  className={`text-right font-mono font-semibold tabular-nums whitespace-nowrap ${
+                    comparisonStats.expectancyR >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                  }`}
+                >
+                  {formatR(comparisonStats.expectancyR)}
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.cagr}</span>
+                  <MetricTooltip text={l.tipCagr} />
+                </dt>
+                <dd className="text-right font-mono font-semibold text-slate-100 tabular-nums whitespace-nowrap">
+                  {primaryFmt.cagrText}
+                </dd>
+                <dd className="text-right font-mono font-semibold text-slate-100 tabular-nums whitespace-nowrap">
+                  {compFmt.cagrText}
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.netReturn}</span>
+                  <MetricTooltip text={l.tipNetRet} />
+                </dt>
+                <dd
+                  className={`text-right font-mono font-semibold tabular-nums whitespace-nowrap ${
+                    stats.netReturnPct >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                  }`}
+                >
+                  {formatPct(stats.netReturnPct)}
+                </dd>
+                <dd
+                  className={`text-right font-mono font-semibold tabular-nums whitespace-nowrap ${
+                    comparisonStats.netReturnPct >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                  }`}
+                >
+                  {formatPct(comparisonStats.netReturnPct)}
+                </dd>
+              </div>
+            </dl>
+          ) : (
+            <dl className="divide-y divide-[#1E2634] text-xs">
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.grossWin}</span>
+                  <MetricTooltip text={l.tipGrossWin} />
+                </dt>
+                <dd className="font-mono font-semibold text-emerald-400 tabular-nums">
+                  +{stats.grossWinR.toFixed(2)} R
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.grossLoss}</span>
+                  <MetricTooltip text={l.tipGrossLoss} />
+                </dt>
+                <dd className="font-mono font-semibold text-rose-400 tabular-nums">
+                  {stats.grossLossR > 0 ? `-${stats.grossLossR.toFixed(2)} R` : '0.00 R'}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.profitFactor}</span>
+                  <MetricTooltip text={l.tipPf} />
+                </dt>
+                <dd
+                  className={`font-mono font-semibold tabular-nums ${
+                    stats.profitFactorInfinite || stats.profitFactor >= 1.5
+                      ? 'text-emerald-400'
+                      : stats.profitFactor >= 1
+                        ? 'text-sky-400'
+                        : 'text-rose-400'
+                  }`}
+                >
+                  {primaryFmt.pfText}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.expectancy}</span>
+                  <MetricTooltip text={l.tipExp} />
+                </dt>
+                <dd
+                  className={`font-mono font-semibold tabular-nums ${
+                    stats.expectancyR >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                  }`}
+                >
+                  {formatR(stats.expectancyR)}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.cagr}</span>
+                  <MetricTooltip text={l.tipCagr} />
+                </dt>
+                <dd className="font-mono font-semibold text-slate-100 tabular-nums">
+                  {primaryFmt.cagrText}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.netReturn}</span>
+                  <MetricTooltip text={l.tipNetRet} />
+                </dt>
+                <dd
+                  className={`font-mono font-semibold tabular-nums ${
+                    stats.netReturnPct >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                  }`}
+                >
+                  {formatPct(stats.netReturnPct)}
+                </dd>
+              </div>
+            </dl>
+          )}
         </section>
 
         {/* Card B: Execution & Consistency */}
@@ -345,64 +504,150 @@ export function InstitutionalMetricsPanel({
             <h3 className="text-sm font-semibold text-slate-100">{l.cardB}</h3>
             <Sliders className="h-4 w-4 text-sky-400" />
           </div>
-          <dl className="divide-y divide-[#1E2634] text-xs">
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.avgWin}</span>
-                <MetricTooltip text={l.tipAvgWin} />
-              </dt>
-              <dd className="font-mono font-semibold text-emerald-400 tabular-nums">
-                +{stats.avgWinR.toFixed(2)} R
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.avgLoss}</span>
-                <MetricTooltip text={l.tipAvgLoss} />
-              </dt>
-              <dd className="font-mono font-semibold text-rose-400 tabular-nums">
-                {stats.avgLossR > 0 ? `-${stats.avgLossR.toFixed(2)} R` : '0.00 R'}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.payoff}</span>
-                <MetricTooltip text={l.tipPayoff} />
-              </dt>
-              <dd className="font-mono font-semibold text-slate-100 tabular-nums">
-                {payoffText}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.maxWinStreak}</span>
-                <MetricTooltip text={l.tipWinStreak} />
-              </dt>
-              <dd className="font-mono font-semibold text-emerald-400 tabular-nums">
-                {stats.maxConsecutiveWins}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.maxLossStreak}</span>
-                <MetricTooltip text={l.tipLossStreak} />
-              </dt>
-              <dd className="font-mono font-semibold text-rose-400 tabular-nums">
-                {stats.maxConsecutiveLosses}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.bestWorst}</span>
-                <MetricTooltip text={l.tipBestWorst} />
-              </dt>
-              <dd className="font-mono font-semibold tabular-nums">
-                <span className="text-emerald-400">{formatR(stats.bestTradeR)}</span>
-                <span className="mx-1.5 text-slate-500">/</span>
-                <span className="text-rose-400">{formatR(stats.worstTradeR)}</span>
-              </dd>
-            </div>
-          </dl>
+          {renderColumnHeaders()}
+          {comparisonStats && compFmt ? (
+            <dl className="divide-y divide-[#1E2634] text-xs">
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.avgWin}</span>
+                  <MetricTooltip text={l.tipAvgWin} />
+                </dt>
+                <dd className="text-right font-mono font-semibold text-emerald-400 tabular-nums whitespace-nowrap">
+                  +{stats.avgWinR.toFixed(2)} R
+                </dd>
+                <dd className="text-right font-mono font-semibold text-emerald-400 tabular-nums whitespace-nowrap">
+                  +{comparisonStats.avgWinR.toFixed(2)} R
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.avgLoss}</span>
+                  <MetricTooltip text={l.tipAvgLoss} />
+                </dt>
+                <dd className="text-right font-mono font-semibold text-rose-400 tabular-nums whitespace-nowrap">
+                  {stats.avgLossR > 0 ? `-${stats.avgLossR.toFixed(2)} R` : '0.00 R'}
+                </dd>
+                <dd className="text-right font-mono font-semibold text-rose-400 tabular-nums whitespace-nowrap">
+                  {comparisonStats.avgLossR > 0
+                    ? `-${comparisonStats.avgLossR.toFixed(2)} R`
+                    : '0.00 R'}
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.payoff}</span>
+                  <MetricTooltip text={l.tipPayoff} />
+                </dt>
+                <dd className="text-right font-mono font-semibold text-slate-100 tabular-nums whitespace-nowrap">
+                  {primaryFmt.payoffText}
+                </dd>
+                <dd className="text-right font-mono font-semibold text-slate-100 tabular-nums whitespace-nowrap">
+                  {compFmt.payoffText}
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.maxWinStreak}</span>
+                  <MetricTooltip text={l.tipWinStreak} />
+                </dt>
+                <dd className="text-right font-mono font-semibold text-emerald-400 tabular-nums">
+                  {stats.maxConsecutiveWins}
+                </dd>
+                <dd className="text-right font-mono font-semibold text-emerald-400 tabular-nums">
+                  {comparisonStats.maxConsecutiveWins}
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.maxLossStreak}</span>
+                  <MetricTooltip text={l.tipLossStreak} />
+                </dt>
+                <dd className="text-right font-mono font-semibold text-rose-400 tabular-nums">
+                  {stats.maxConsecutiveLosses}
+                </dd>
+                <dd className="text-right font-mono font-semibold text-rose-400 tabular-nums">
+                  {comparisonStats.maxConsecutiveLosses}
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.bestWorst}</span>
+                  <MetricTooltip text={l.tipBestWorst} />
+                </dt>
+                <dd className="text-right font-mono text-[11px] leading-tight font-semibold tabular-nums">
+                  <div className="text-emerald-400 whitespace-nowrap">{formatR(stats.bestTradeR)}</div>
+                  <div className="text-rose-400 whitespace-nowrap">{formatR(stats.worstTradeR)}</div>
+                </dd>
+                <dd className="text-right font-mono text-[11px] leading-tight font-semibold tabular-nums">
+                  <div className="text-emerald-400 whitespace-nowrap">
+                    {formatR(comparisonStats.bestTradeR)}
+                  </div>
+                  <div className="text-rose-400 whitespace-nowrap">
+                    {formatR(comparisonStats.worstTradeR)}
+                  </div>
+                </dd>
+              </div>
+            </dl>
+          ) : (
+            <dl className="divide-y divide-[#1E2634] text-xs">
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.avgWin}</span>
+                  <MetricTooltip text={l.tipAvgWin} />
+                </dt>
+                <dd className="font-mono font-semibold text-emerald-400 tabular-nums">
+                  +{stats.avgWinR.toFixed(2)} R
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.avgLoss}</span>
+                  <MetricTooltip text={l.tipAvgLoss} />
+                </dt>
+                <dd className="font-mono font-semibold text-rose-400 tabular-nums">
+                  {stats.avgLossR > 0 ? `-${stats.avgLossR.toFixed(2)} R` : '0.00 R'}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.payoff}</span>
+                  <MetricTooltip text={l.tipPayoff} />
+                </dt>
+                <dd className="font-mono font-semibold text-slate-100 tabular-nums">
+                  {primaryFmt.payoffText}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.maxWinStreak}</span>
+                  <MetricTooltip text={l.tipWinStreak} />
+                </dt>
+                <dd className="font-mono font-semibold text-emerald-400 tabular-nums">
+                  {stats.maxConsecutiveWins}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.maxLossStreak}</span>
+                  <MetricTooltip text={l.tipLossStreak} />
+                </dt>
+                <dd className="font-mono font-semibold text-rose-400 tabular-nums">
+                  {stats.maxConsecutiveLosses}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.bestWorst}</span>
+                  <MetricTooltip text={l.tipBestWorst} />
+                </dt>
+                <dd className="font-mono font-semibold tabular-nums">
+                  <span className="text-emerald-400">{formatR(stats.bestTradeR)}</span>
+                  <span className="mx-1.5 text-slate-500">/</span>
+                  <span className="text-rose-400">{formatR(stats.worstTradeR)}</span>
+                </dd>
+              </div>
+            </dl>
+          )}
         </section>
 
         {/* Card C: Institutional Risk-Adjusted Ratios */}
@@ -411,78 +656,196 @@ export function InstitutionalMetricsPanel({
             <h3 className="text-sm font-semibold text-slate-100">{l.cardC}</h3>
             <ShieldCheck className="h-4 w-4 text-sky-400" />
           </div>
-          <dl className="divide-y divide-[#1E2634] text-xs">
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.sharpe}</span>
-                <MetricTooltip text={l.tipSharpe} />
-              </dt>
-              <dd
-                className={`font-mono font-semibold tabular-nums ${
-                  (stats.sharpeRatio ?? 0) >= 1.5
-                    ? 'text-emerald-400'
-                    : (stats.sharpeRatio ?? 0) >= 0.8
-                      ? 'text-sky-400'
-                      : 'text-slate-100'
-                }`}
-              >
-                {sharpeText}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.sortino}</span>
-                <MetricTooltip text={l.tipSortino} />
-              </dt>
-              <dd className="font-mono font-semibold text-slate-100 tabular-nums">
-                {sortinoText}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.calmar}</span>
-                <MetricTooltip text={l.tipCalmar} />
-              </dt>
-              <dd className="font-mono font-semibold text-slate-100 tabular-nums">
-                {calmarText}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.recovery}</span>
-                <MetricTooltip text={l.tipRecovery} />
-              </dt>
-              <dd className="font-mono font-semibold text-slate-100 tabular-nums">
-                {recoveryText}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.ror}</span>
-                <MetricTooltip text={l.tipRor} />
-              </dt>
-              <dd
-                className={`font-mono font-semibold tabular-nums ${
-                  stats.riskOfRuinPct < 5
-                    ? 'text-emerald-400'
-                    : stats.riskOfRuinPct < 20
-                      ? 'text-amber-400'
-                      : 'text-rose-400'
-                }`}
-              >
-                {stats.riskOfRuinPct.toFixed(2)}%
-              </dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="flex items-center gap-1.5 text-slate-400">
-                <span>{l.maxDdPct}</span>
-                <MetricTooltip text={l.tipMaxDd} />
-              </dt>
-              <dd className="font-mono font-semibold text-rose-400 tabular-nums">
-                -{stats.maxDrawdownR.toFixed(2)} R (-{stats.maxDrawdownPct.toFixed(2)}%)
-              </dd>
-            </div>
-          </dl>
+          {renderColumnHeaders()}
+          {comparisonStats && compFmt ? (
+            <dl className="divide-y divide-[#1E2634] text-xs">
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.sharpe}</span>
+                  <MetricTooltip text={l.tipSharpe} />
+                </dt>
+                <dd
+                  className={`text-right font-mono font-semibold tabular-nums whitespace-nowrap ${
+                    (stats.sharpeRatio ?? 0) >= 1.5
+                      ? 'text-emerald-400'
+                      : (stats.sharpeRatio ?? 0) >= 0.8
+                        ? 'text-sky-400'
+                        : 'text-slate-100'
+                  }`}
+                >
+                  {primaryFmt.sharpeText}
+                </dd>
+                <dd
+                  className={`text-right font-mono font-semibold tabular-nums whitespace-nowrap ${
+                    (comparisonStats.sharpeRatio ?? 0) >= 1.5
+                      ? 'text-emerald-400'
+                      : (comparisonStats.sharpeRatio ?? 0) >= 0.8
+                        ? 'text-sky-400'
+                        : 'text-slate-100'
+                  }`}
+                >
+                  {compFmt.sharpeText}
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.sortino}</span>
+                  <MetricTooltip text={l.tipSortino} />
+                </dt>
+                <dd className="text-right font-mono font-semibold text-slate-100 tabular-nums whitespace-nowrap">
+                  {primaryFmt.sortinoText}
+                </dd>
+                <dd className="text-right font-mono font-semibold text-slate-100 tabular-nums whitespace-nowrap">
+                  {compFmt.sortinoText}
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.calmar}</span>
+                  <MetricTooltip text={l.tipCalmar} />
+                </dt>
+                <dd className="text-right font-mono font-semibold text-slate-100 tabular-nums whitespace-nowrap">
+                  {primaryFmt.calmarText}
+                </dd>
+                <dd className="text-right font-mono font-semibold text-slate-100 tabular-nums whitespace-nowrap">
+                  {compFmt.calmarText}
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.recovery}</span>
+                  <MetricTooltip text={l.tipRecovery} />
+                </dt>
+                <dd className="text-right font-mono font-semibold text-slate-100 tabular-nums whitespace-nowrap">
+                  {primaryFmt.recoveryText}
+                </dd>
+                <dd className="text-right font-mono font-semibold text-slate-100 tabular-nums whitespace-nowrap">
+                  {compFmt.recoveryText}
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.ror}</span>
+                  <MetricTooltip text={l.tipRor} />
+                </dt>
+                <dd
+                  className={`text-right font-mono font-semibold tabular-nums whitespace-nowrap ${
+                    stats.riskOfRuinPct < 5
+                      ? 'text-emerald-400'
+                      : stats.riskOfRuinPct < 20
+                        ? 'text-amber-400'
+                        : 'text-rose-400'
+                  }`}
+                >
+                  {stats.riskOfRuinPct.toFixed(2)}%
+                </dd>
+                <dd
+                  className={`text-right font-mono font-semibold tabular-nums whitespace-nowrap ${
+                    comparisonStats.riskOfRuinPct < 5
+                      ? 'text-emerald-400'
+                      : comparisonStats.riskOfRuinPct < 20
+                        ? 'text-amber-400'
+                        : 'text-rose-400'
+                  }`}
+                >
+                  {comparisonStats.riskOfRuinPct.toFixed(2)}%
+                </dd>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_82px_92px] items-center gap-2 py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span className="truncate">{l.maxDdPct}</span>
+                  <MetricTooltip text={l.tipMaxDd} />
+                </dt>
+                <dd className="text-right font-mono text-[11px] leading-tight font-semibold text-rose-400 tabular-nums">
+                  <div className="whitespace-nowrap">-{stats.maxDrawdownR.toFixed(2)} R</div>
+                  <div className="text-rose-300/80 whitespace-nowrap">
+                    (-{stats.maxDrawdownPct.toFixed(2)}%)
+                  </div>
+                </dd>
+                <dd className="text-right font-mono text-[11px] leading-tight font-semibold text-rose-400 tabular-nums">
+                  <div className="whitespace-nowrap">
+                    -{comparisonStats.maxDrawdownR.toFixed(2)} R
+                  </div>
+                  <div className="text-rose-300/80 whitespace-nowrap">
+                    (-{comparisonStats.maxDrawdownPct.toFixed(2)}%)
+                  </div>
+                </dd>
+              </div>
+            </dl>
+          ) : (
+            <dl className="divide-y divide-[#1E2634] text-xs">
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.sharpe}</span>
+                  <MetricTooltip text={l.tipSharpe} />
+                </dt>
+                <dd
+                  className={`font-mono font-semibold tabular-nums ${
+                    (stats.sharpeRatio ?? 0) >= 1.5
+                      ? 'text-emerald-400'
+                      : (stats.sharpeRatio ?? 0) >= 0.8
+                        ? 'text-sky-400'
+                        : 'text-slate-100'
+                  }`}
+                >
+                  {primaryFmt.sharpeText}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.sortino}</span>
+                  <MetricTooltip text={l.tipSortino} />
+                </dt>
+                <dd className="font-mono font-semibold text-slate-100 tabular-nums">
+                  {primaryFmt.sortinoText}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.calmar}</span>
+                  <MetricTooltip text={l.tipCalmar} />
+                </dt>
+                <dd className="font-mono font-semibold text-slate-100 tabular-nums">
+                  {primaryFmt.calmarText}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.recovery}</span>
+                  <MetricTooltip text={l.tipRecovery} />
+                </dt>
+                <dd className="font-mono font-semibold text-slate-100 tabular-nums">
+                  {primaryFmt.recoveryText}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.ror}</span>
+                  <MetricTooltip text={l.tipRor} />
+                </dt>
+                <dd
+                  className={`font-mono font-semibold tabular-nums ${
+                    stats.riskOfRuinPct < 5
+                      ? 'text-emerald-400'
+                      : stats.riskOfRuinPct < 20
+                        ? 'text-amber-400'
+                        : 'text-rose-400'
+                  }`}
+                >
+                  {stats.riskOfRuinPct.toFixed(2)}%
+                </dd>
+              </div>
+              <div className="flex items-center justify-between py-2.5">
+                <dt className="flex items-center gap-1.5 text-slate-400">
+                  <span>{l.maxDdPct}</span>
+                  <MetricTooltip text={l.tipMaxDd} />
+                </dt>
+                <dd className="font-mono font-semibold text-rose-400 tabular-nums">
+                  -{stats.maxDrawdownR.toFixed(2)} R (-{stats.maxDrawdownPct.toFixed(2)}%)
+                </dd>
+              </div>
+            </dl>
+          )}
         </section>
       </div>
 

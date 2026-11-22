@@ -116,7 +116,7 @@ service cloud.firestore {
         && data.ownerId == request.auth.uid
         && data.category is string
         && data.category.size() <= 16
-        && data.category in ['backtest', 'live', 'missed']
+        && data.category in ['backtest', 'live']
         && data.date is string
         && data.date.size() == 10
         && data.date.matches('^\\d{4}-\\d{2}-\\d{2}$')
@@ -126,6 +126,77 @@ service cloud.firestore {
         && isValidStrategy(data.setup)
         && isValidStrategy(data.strategy)
         && data.isMissed is bool
+        && data.isMissed == false
+        && data.bias is string
+        && data.bias.size() <= 8
+        && data.bias in ['LONG', 'SHORT']
+        && data.riskPct is number
+        && data.riskPct >= 0
+        && data.riskPct <= 100
+        && data.outcome is string
+        && data.outcome.size() <= 16
+        && data.outcome in ['TP', 'STOP LOSS', 'BE', 'UNFILLED']
+        && data.netR is number
+        && data.netR >= -1000
+        && data.netR <= 10000
+        && data.netReturnPct is number
+        && data.netReturnPct >= -10000
+        && data.netReturnPct <= 100000
+        && data.notes is string
+        && data.notes.size() <= 2000
+        && data.tradingViewUrl is string
+        && data.tradingViewUrl.size() <= 500
+        && data.clientCreatedAt is number
+        && data.clientCreatedAt >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && isOptionalSmallString(data, 'day', 32)
+        && isOptionalSmallString(data, 'session', 40)
+        && isOptionalSmallString(data, 'entryTime', 20)
+        && isOptionalSmallString(data, 'exitTime', 20)
+        && isOptionalSmallString(data, 'missedReason', 80)
+        && isOptionalNumber(data, 'entryPrice', 0, 100000000)
+        && isOptionalNumber(data, 'slPrice', 0, 100000000)
+        && isOptionalNumber(data, 'tpPrice', 0, 100000000)
+        && isOptionalNumber(data, 'slPips', 0, 1000000)
+        && isOptionalNumber(data, 'tpPips', 0, 1000000)
+        && isOptionalNumber(data, 'targetRR', -1000, 10000)
+        && isOptionalNumber(data, 'rrMax', -1000, 10000)
+        && (!('extraColumns' in data) || (data.extraColumns is map && data.extraColumns.size() <= 20));
+    }
+
+    function isValidMissedTrade(data, userId, tradeId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'category', 'date', 'asset', 'setup', 'strategy',
+          'isMissed', 'bias', 'riskPct', 'outcome', 'netR', 'netReturnPct',
+          'notes', 'tradingViewUrl', 'clientCreatedAt', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'category', 'date', 'day', 'session', 'entryTime', 'exitTime',
+          'asset', 'setup', 'strategy', 'isMissed', 'bias', 'riskPct',
+          'entryPrice', 'slPrice', 'tpPrice', 'slPips', 'tpPips', 'targetRR',
+          'outcome', 'netR', 'rrMax', 'netReturnPct', 'missedReason',
+          'notes', 'tradingViewUrl', 'extraColumns', 'clientCreatedAt', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == tradeId
+        && isValidId(data.id)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.category is string
+        && data.category.size() <= 16
+        && data.category == 'missed'
+        && data.date is string
+        && data.date.size() == 10
+        && data.date.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && data.asset is string
+        && data.asset.size() >= 1
+        && data.asset.size() <= 32
+        && isValidStrategy(data.setup)
+        && isValidStrategy(data.strategy)
+        && data.isMissed is bool
+        && data.isMissed == true
         && data.bias is string
         && data.bias.size() <= 8
         && data.bias in ['LONG', 'SHORT']
@@ -277,6 +348,46 @@ service cloud.firestore {
           && isValidId(tradeId)
           && isOwner(userId)
           && isValidTrade(incoming(), userId, tradeId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && parentUserExists(userId)
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'category', 'date', 'day', 'session', 'entryTime', 'exitTime',
+            'asset', 'setup', 'strategy', 'isMissed', 'bias', 'riskPct',
+            'entryPrice', 'slPrice', 'tpPrice', 'slPips', 'tpPips', 'targetRR',
+            'outcome', 'netR', 'rrMax', 'netReturnPct', 'missedReason',
+            'notes', 'tradingViewUrl', 'extraColumns', 'updatedAt'
+          ]);
+        allow delete: if isAuthenticatedAccount()
+          && isValidId(userId)
+          && isValidId(tradeId)
+          && isOwner(userId)
+          && parentUserExists(userId);
+      }
+
+      match /missedTrades/{tradeId} {
+        allow get: if isValidId(userId)
+          && isValidId(tradeId)
+          && isOwner(userId)
+          && parentUserExists(userId);
+        allow list: if isValidId(userId)
+          && isOwner(userId)
+          && resource.data.ownerId == request.auth.uid;
+        allow create: if isAuthenticatedAccount()
+          && isValidId(userId)
+          && isValidId(tradeId)
+          && isOwner(userId)
+          && isValidMissedTrade(incoming(), userId, tradeId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && parentUserExists(userId);
+        allow update: if isAuthenticatedAccount()
+          && isValidId(userId)
+          && isValidId(tradeId)
+          && isOwner(userId)
+          && isValidMissedTrade(incoming(), userId, tradeId)
           && incoming().id == existing().id
           && incoming().ownerId == existing().ownerId
           && incoming().createdAt == existing().createdAt

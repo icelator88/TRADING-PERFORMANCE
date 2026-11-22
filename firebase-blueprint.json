@@ -97,7 +97,7 @@
     },
     "Trade": {
       "title": "Trade",
-      "description": "Mechanical trading journal entry belonging strictly to one authenticated user.",
+      "description": "Mechanical trading journal entry belonging strictly to one authenticated user across Backtest and Live Journal.",
       "type": "object",
       "properties": {
         "id": {
@@ -116,8 +116,159 @@
         },
         "category": {
           "type": "string",
-          "enum": ["backtest", "live", "missed"],
-          "description": "Journal bucket separating backtest, executed live journal, and missed trades."
+          "enum": ["backtest", "live"],
+          "description": "Journal bucket separating backtest and executed live journal."
+        },
+        "date": {
+          "type": "string",
+          "description": "ISO date YYYY-MM-DD.",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "day": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "session": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "entryTime": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "exitTime": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "asset": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "setup": {
+          "type": "string",
+          "enum": ["S1", "SSA", "MUT", "SBIL DOMINANCE REALE", "SBIL INTRADOMINANCE"],
+          "maxLength": 40
+        },
+        "strategy": {
+          "type": "string",
+          "enum": ["S1", "SSA", "MUT", "SBIL DOMINANCE REALE", "SBIL INTRADOMINANCE"],
+          "maxLength": 40
+        },
+        "isMissed": {
+          "type": "boolean"
+        },
+        "bias": {
+          "type": "string",
+          "enum": ["LONG", "SHORT"]
+        },
+        "riskPct": {
+          "type": "number"
+        },
+        "entryPrice": {
+          "type": "number"
+        },
+        "slPrice": {
+          "type": "number"
+        },
+        "tpPrice": {
+          "type": "number"
+        },
+        "slPips": {
+          "type": "number"
+        },
+        "tpPips": {
+          "type": "number"
+        },
+        "targetRR": {
+          "type": "number"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["TP", "STOP LOSS", "BE", "UNFILLED"]
+        },
+        "netR": {
+          "type": "number"
+        },
+        "rrMax": {
+          "type": "number"
+        },
+        "netReturnPct": {
+          "type": "number"
+        },
+        "missedReason": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "tradingViewUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "extraColumns": {
+          "type": "object"
+        },
+        "clientCreatedAt": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "category",
+        "date",
+        "asset",
+        "setup",
+        "strategy",
+        "isMissed",
+        "bias",
+        "riskPct",
+        "outcome",
+        "netR",
+        "netReturnPct",
+        "notes",
+        "tradingViewUrl",
+        "clientCreatedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MissedTrade": {
+      "title": "MissedTrade",
+      "description": "Standalone missed-trade entry belonging strictly to one authenticated user in Trade Non Presi.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Document identifier.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["missed"],
+          "description": "Strictly isolated missed-trade category."
         },
         "date": {
           "type": "string",
@@ -336,7 +487,11 @@
     },
     "/users/{userId}/trades/{tradeId}": {
       "schema": { "$ref": "#/entities/Trade" },
-      "description": "Per-user trading journal entries across Backtest, Live Journal, and Missed Trades."
+      "description": "Per-user trading journal entries across Backtest and Live Journal only."
+    },
+    "/users/{userId}/missedTrades/{tradeId}": {
+      "schema": { "$ref": "#/entities/MissedTrade" },
+      "description": "Per-user isolated Trade Non Presi entries stored separately from Backtest and Live Journal."
     },
     "/users/{userId}/googleSheets/{sheetId}": {
       "schema": { "$ref": "#/entities/GoogleSheetSource" },

@@ -316,15 +316,20 @@ function buildTradePayload(
   return { safeId, payload };
 }
 
-function docToTradeRecord(data: Record<string, unknown>, docId: string): TradeRecord | null {
+function docToTradeRecord(
+  data: Record<string, unknown>,
+  docId: string,
+  forcedCategory?: TradeCategory,
+): TradeRecord | null {
   const asset = String(data.asset ?? '').trim().toUpperCase();
   const date = String(data.date ?? '').trim();
   if (!asset || !date) return null;
 
-  const category: TradeCategory =
+  const parsedCategory: TradeCategory =
     data.category === 'backtest' || data.category === 'live' || data.category === 'missed'
       ? data.category
       : 'live';
+  const category: TradeCategory = forcedCategory ?? parsedCategory;
   const setup = normalizeSetupName(String(data.setup ?? data.strategy ?? 'S1'));
 
   const base: TradeRecord = {
@@ -351,7 +356,10 @@ function docToTradeRecord(data: Record<string, unknown>, docId: string): TradeRe
     netR: typeof data.netR === 'number' ? roundTo(data.netR, 2) : 0,
     rrMax: typeof data.rrMax === 'number' ? data.rrMax : null,
     netReturnPct: typeof data.netReturnPct === 'number' ? roundTo(data.netReturnPct, 2) : 0,
-    missedReason: typeof data.missedReason === 'string' ? data.missedReason : undefined,
+    missedReason:
+      category === 'missed' && typeof data.missedReason === 'string'
+        ? data.missedReason
+        : undefined,
     notes: typeof data.notes === 'string' ? data.notes : '',
     tradingViewUrl: typeof data.tradingViewUrl === 'string' ? data.tradingViewUrl : '',
     extraColumns:
@@ -365,6 +373,68 @@ function docToTradeRecord(data: Record<string, unknown>, docId: string): TradeRe
   };
 
   return runRowCalculationEngine(base);
+}
+
+export async function migrateLegacyMissedTradesFromTradesCollection(
+  uid: string,
+): Promise<void> {
+  const safeUid = sanitizeId(uid, 'user');
+  const tradesColPath = `users/${safeUid}/trades`;
+  const legacyQuery = query(
+    collection(db, 'users', safeUid, 'trades'),
+    where('ownerId', '==', safeUid),
+  );
+
+  try {
+    const legacySnapshot = await getDocs(legacyQuery);
+    const legacyDocs: Array<{ docId: string; trade: TradeRecord }> = [];
+
+    legacySnapshot.forEach((docSnap) => {
+      const data = docSnap.data() as Record<string, unknown>;
+      if (data.category === 'missed') {
+        const parsed = docToTradeRecord(data, docSnap.id, 'missed');
+        if (parsed) {
+          legacyDocs.push({ docId: docSnap.id, trade: parsed });
+        }
+      }
+    });
+
+    if (legacyDocs.length === 0) return;
+
+    const existingMissedSnap = await getDocs(
+      query(
+        collection(db, 'users', safeUid, 'missedTrades'),
+        where('ownerId', '==', safeUid),
+      ),
+    );
+    const existingMissedIds = new Set<string>();
+    existingMissedSnap.forEach((docSnap) => {
+      existingMissedIds.add(docSnap.id);
+    });
+
+    const CHUNK_SIZE = 200;
+    for (let i = 0; i < legacyDocs.length; i += CHUNK_SIZE) {
+      const chunk = legacyDocs.slice(i, i + CHUNK_SIZE);
+      const batch = writeBatch(db);
+      chunk.forEach(({ docId, trade }) => {
+        const { safeId, payload } = buildTradePayload(
+          { ...trade, category: 'missed', isMissed: true },
+          safeUid,
+          'create',
+        );
+        if (!existingMissedIds.has(safeId)) {
+          const targetRef = doc(db, 'users', safeUid, 'missedTrades', safeId);
+          batch.set(targetRef, payload);
+          existingMissedIds.add(safeId);
+        }
+        const legacyRef = doc(db, 'users', safeUid, 'trades', docId);
+        batch.delete(legacyRef);
+      });
+      await batch.commit();
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, tradesColPath);
+  }
 }
 
 export async function fetchUserTradesFromFirestore(
@@ -385,7 +455,9 @@ export async function fetchUserTradesFromFirestore(
         docSnap.data() as Record<string, unknown>,
         docSnap.id,
       );
-      if (parsed) list.push(parsed);
+      if (parsed && (parsed.category === 'backtest' || parsed.category === 'live')) {
+        list.push(parsed);
+      }
     });
     return list;
   } catch (error) {
@@ -414,7 +486,9 @@ export function subscribeUserTrades(
           docSnap.data() as Record<string, unknown>,
           docSnap.id,
         );
-        if (parsed) list.push(parsed);
+        if (parsed && (parsed.category === 'backtest' || parsed.category === 'live')) {
+          list.push(parsed);
+        }
       });
       onTrades(list);
     },
@@ -435,9 +509,16 @@ export async function upsertTradeInFirestore(
   trade: TradeRecord,
   isExistingInCloud: boolean,
 ): Promise<void> {
+  if (trade.category === 'missed') {
+    throw new Error('Missed trades must be saved in the missedTrades collection.');
+  }
   const safeUid = sanitizeId(uid, 'user');
   const mode = isExistingInCloud ? 'update' : 'create';
-  const { safeId, payload } = buildTradePayload(trade, safeUid, mode);
+  const { safeId, payload } = buildTradePayload(
+    { ...trade, isMissed: false, missedReason: undefined },
+    safeUid,
+    mode,
+  );
   const docPath = `users/${safeUid}/trades/${safeId}`;
   const ref = doc(db, 'users', safeUid, 'trades', safeId);
 
@@ -460,17 +541,24 @@ export async function batchCreateTradesInFirestore(
   uid: string,
   trades: TradeRecord[],
 ): Promise<void> {
-  if (trades.length === 0) return;
+  const validTrades = trades.filter(
+    (tr) => tr.category === 'backtest' || tr.category === 'live',
+  );
+  if (validTrades.length === 0) return;
   const safeUid = sanitizeId(uid, 'user');
   const colPath = `users/${safeUid}/trades`;
 
   const CHUNK_SIZE = 400;
   try {
-    for (let i = 0; i < trades.length; i += CHUNK_SIZE) {
-      const chunk = trades.slice(i, i + CHUNK_SIZE);
+    for (let i = 0; i < validTrades.length; i += CHUNK_SIZE) {
+      const chunk = validTrades.slice(i, i + CHUNK_SIZE);
       const batch = writeBatch(db);
       chunk.forEach((tr) => {
-        const { safeId, payload } = buildTradePayload(tr, safeUid, 'create');
+        const { safeId, payload } = buildTradePayload(
+          { ...tr, isMissed: false, missedReason: undefined },
+          safeUid,
+          'create',
+        );
         const ref = doc(db, 'users', safeUid, 'trades', safeId);
         batch.set(ref, payload);
       });
@@ -513,6 +601,171 @@ export async function batchDeleteTradesInFirestore(
       chunk.forEach((rawId) => {
         const safeId = sanitizeId(rawId, 'tr');
         const ref = doc(db, 'users', safeUid, 'trades', safeId);
+        batch.delete(ref);
+      });
+      await batch.commit();
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, colPath);
+  }
+}
+
+export async function fetchUserMissedTradesFromFirestore(
+  uid: string,
+): Promise<TradeRecord[]> {
+  const safeUid = sanitizeId(uid, 'user');
+  const colPath = `users/${safeUid}/missedTrades`;
+  const q = query(
+    collection(db, 'users', safeUid, 'missedTrades'),
+    where('ownerId', '==', safeUid),
+  );
+
+  try {
+    const snapshot = await getDocs(q);
+    const list: TradeRecord[] = [];
+    snapshot.forEach((docSnap) => {
+      const parsed = docToTradeRecord(
+        docSnap.data() as Record<string, unknown>,
+        docSnap.id,
+        'missed',
+      );
+      if (parsed) list.push(parsed);
+    });
+    return list;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, colPath);
+  }
+}
+
+export function subscribeUserMissedTrades(
+  uid: string,
+  onMissedTrades: (trades: TradeRecord[]) => void,
+  onError?: (error: Error) => void,
+): Unsubscribe {
+  const safeUid = sanitizeId(uid, 'user');
+  const colPath = `users/${safeUid}/missedTrades`;
+  const q = query(
+    collection(db, 'users', safeUid, 'missedTrades'),
+    where('ownerId', '==', safeUid),
+  );
+
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list: TradeRecord[] = [];
+      snapshot.forEach((docSnap) => {
+        const parsed = docToTradeRecord(
+          docSnap.data() as Record<string, unknown>,
+          docSnap.id,
+          'missed',
+        );
+        if (parsed) list.push(parsed);
+      });
+      onMissedTrades(list);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.GET, colPath);
+      } catch (wrapped) {
+        if (onError && wrapped instanceof Error) {
+          onError(wrapped);
+        }
+      }
+    },
+  );
+}
+
+export async function upsertMissedTradeInFirestore(
+  uid: string,
+  trade: TradeRecord,
+  isExistingInCloud: boolean,
+): Promise<void> {
+  const safeUid = sanitizeId(uid, 'user');
+  const mode = isExistingInCloud ? 'update' : 'create';
+  const { safeId, payload } = buildTradePayload(
+    { ...trade, category: 'missed', isMissed: true },
+    safeUid,
+    mode,
+  );
+  const docPath = `users/${safeUid}/missedTrades/${safeId}`;
+  const ref = doc(db, 'users', safeUid, 'missedTrades', safeId);
+
+  try {
+    if (isExistingInCloud) {
+      await updateDoc(ref, payload);
+    } else {
+      await setDoc(ref, payload);
+    }
+  } catch (error) {
+    handleFirestoreError(
+      error,
+      isExistingInCloud ? OperationType.UPDATE : OperationType.CREATE,
+      docPath,
+    );
+  }
+}
+
+export async function batchCreateMissedTradesInFirestore(
+  uid: string,
+  trades: TradeRecord[],
+): Promise<void> {
+  if (trades.length === 0) return;
+  const safeUid = sanitizeId(uid, 'user');
+  const colPath = `users/${safeUid}/missedTrades`;
+
+  const CHUNK_SIZE = 400;
+  try {
+    for (let i = 0; i < trades.length; i += CHUNK_SIZE) {
+      const chunk = trades.slice(i, i + CHUNK_SIZE);
+      const batch = writeBatch(db);
+      chunk.forEach((tr) => {
+        const { safeId, payload } = buildTradePayload(
+          { ...tr, category: 'missed', isMissed: true },
+          safeUid,
+          'create',
+        );
+        const ref = doc(db, 'users', safeUid, 'missedTrades', safeId);
+        batch.set(ref, payload);
+      });
+      await batch.commit();
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, colPath);
+  }
+}
+
+export async function deleteMissedTradeInFirestore(
+  uid: string,
+  tradeId: string,
+): Promise<void> {
+  const safeUid = sanitizeId(uid, 'user');
+  const safeId = sanitizeId(tradeId, 'mi');
+  const docPath = `users/${safeUid}/missedTrades/${safeId}`;
+  const ref = doc(db, 'users', safeUid, 'missedTrades', safeId);
+
+  try {
+    await deleteDoc(ref);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, docPath);
+  }
+}
+
+export async function batchDeleteMissedTradesInFirestore(
+  uid: string,
+  tradeIds: string[],
+): Promise<void> {
+  if (tradeIds.length === 0) return;
+  const safeUid = sanitizeId(uid, 'user');
+  const colPath = `users/${safeUid}/missedTrades`;
+
+  const CHUNK_SIZE = 400;
+  try {
+    for (let i = 0; i < tradeIds.length; i += CHUNK_SIZE) {
+      const chunk = tradeIds.slice(i, i + CHUNK_SIZE);
+      const batch = writeBatch(db);
+      chunk.forEach((rawId) => {
+        const safeId = sanitizeId(rawId, 'mi');
+        const ref = doc(db, 'users', safeUid, 'missedTrades', safeId);
         batch.delete(ref);
       });
       await batch.commit();
