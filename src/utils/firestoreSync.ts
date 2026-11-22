@@ -226,7 +226,7 @@ function buildTradePayload(
     -10000,
     100000,
   );
-  const safeIsMissed = Boolean(trade.isMissed || safeCategory === 'missed');
+  const safeIsMissed = safeCategory === 'missed';
   const safeNotes = String(trade.notes ?? '').slice(0, 2000);
   const safeLink = String(trade.tradingViewUrl ?? '').trim().slice(0, 500);
   const safeAsset = (String(trade.asset ?? '').trim().toUpperCase() || 'ASSET').slice(0, 32);
@@ -338,7 +338,7 @@ function docToTradeRecord(data: Record<string, unknown>, docId: string): TradeRe
     asset,
     setup,
     strategy: setup,
-    isMissed: Boolean(data.isMissed || category === 'missed'),
+    isMissed: category === 'missed',
     bias: data.bias === 'SHORT' ? 'SHORT' : 'LONG',
     riskPct: typeof data.riskPct === 'number' ? data.riskPct : 1,
     entryPrice: typeof data.entryPrice === 'number' ? data.entryPrice : null,

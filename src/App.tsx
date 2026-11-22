@@ -43,9 +43,7 @@ import {
   formatDisplayDate,
   formatPct,
   formatR,
-  generateTradeId,
   roundTo,
-  runRowCalculationEngine,
 } from './utils/calculations';
 import {
   batchCreateTradesInFirestore,
@@ -67,21 +65,15 @@ import { analizzaTradeConGemini, buildGeminiReviewPrompt } from './utils/geminiR
 import { fetchAndParseGoogleSheetTrades } from './utils/googleSheets';
 import {
   buildTradeCoreDuplicateKey,
-  buildTradeDuplicateKey,
   deduplicateImportedTrades,
   exportBackupJson,
   exportTradesCsv,
   parseBackupJsonContent,
 } from './utils/importer';
 import {
-  loadAllTradesSafely,
   loadLanguagePreference,
   saveLanguagePreference,
-  saveTradesSafely,
 } from './utils/storage';
-
-const LAST_UID_STORAGE_KEY = 'diariotrade_last_uid_v1';
-const CLOUD_MIGRATED_UID_STORAGE_KEY = 'diariotrade_cloud_migrated_uid_v1';
 
 export function App() {
   const [lang, setLang] = useState<Language>(() => loadLanguagePreference());
@@ -116,6 +108,7 @@ export function App() {
   const [cleaningDuplicates, setCleaningDuplicates] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState<TradeRecord | null>(null);
+  const [deletingSingle, setDeletingSingle] = useState(false);
   const [resetSectionTarget, setResetSectionTarget] = useState<TradeCategory | null>(null);
   const [resettingSection, setResettingSection] = useState(false);
 
@@ -138,7 +131,6 @@ export function App() {
   const [fatalError, setFatalError] = useState<Error | null>(null);
 
   const cloudIdsRef = useRef<Set<string>>(new Set());
-  const initialSyncDoneRef = useRef<boolean>(false);
   const settingsRef = useRef<CloudUserSettings>({
     language: lang,
     activeTab,
@@ -235,7 +227,6 @@ export function App() {
       if (!active) return;
 
       if (!user) {
-        initialSyncDoneRef.current = false;
         cloudIdsRef.current.clear();
         setBacktestTrades([]);
         setLiveTrades([]);
@@ -250,7 +241,6 @@ export function App() {
       setFirebaseUser(user);
       setAuthReady(true);
       setCloudSyncStatus('syncing');
-      initialSyncDoneRef.current = false;
 
       try {
         await ensureUserProfile(user);
@@ -296,99 +286,14 @@ export function App() {
 
       unsubTrades = subscribeUserTrades(
         user.uid,
-        async (cloudTrades) => {
+        (cloudTrades) => {
           if (!active) return;
 
-          const nextCloudIds = new Set(cloudTrades.map((tr) => tr.id));
-
-          if (!initialSyncDoneRef.current) {
-            initialSyncDoneRef.current = true;
-
-            let previousUid: string | null = null;
-            let migratedUid: string | null = null;
-            try {
-              previousUid = localStorage.getItem(LAST_UID_STORAGE_KEY);
-              migratedUid = localStorage.getItem(CLOUD_MIGRATED_UID_STORAGE_KEY);
-              localStorage.setItem(LAST_UID_STORAGE_KEY, user.uid);
-            } catch {
-              previousUid = null;
-              migratedUid = null;
-            }
-
-            const canMigrateLocal =
-              migratedUid !== user.uid && (!previousUid || previousUid === user.uid);
-            const localLoaded = canMigrateLocal
-              ? loadAllTradesSafely()
-              : { backtest: [], live: [], missed: [] };
-            const localAll = [
-              ...localLoaded.backtest,
-              ...localLoaded.live,
-              ...localLoaded.missed,
-            ];
-
-            const cloudDupKeys = new Set(
-              cloudTrades.map((tr) => `${tr.category}|${buildTradeDuplicateKey(tr)}`),
-            );
-            const seenLocalIds = new Set<string>();
-            const localOnlyTrades: TradeRecord[] = [];
-
-            localAll.forEach((tr) => {
-              const catKey = `${tr.category}|${buildTradeDuplicateKey(tr)}`;
-              if (
-                !nextCloudIds.has(tr.id) &&
-                !cloudDupKeys.has(catKey) &&
-                !seenLocalIds.has(tr.id)
-              ) {
-                seenLocalIds.add(tr.id);
-                cloudDupKeys.add(catKey);
-                localOnlyTrades.push(tr);
-              }
-            });
-
-            if (localOnlyTrades.length > 0) {
-              localOnlyTrades.forEach((tr) => nextCloudIds.add(tr.id));
-              cloudIdsRef.current = nextCloudIds;
-
-              const merged = [...cloudTrades, ...localOnlyTrades];
-              const { bt, lv, ms } = splitTradesByCategory(merged);
-              setBacktestTrades(bt);
-              setLiveTrades(lv);
-              setMissedTrades(ms);
-              saveTradesSafely('backtest', bt);
-              saveTradesSafely('live', lv);
-              saveTradesSafely('missed', ms);
-
-              try {
-                await batchCreateTradesInFirestore(user.uid, localOnlyTrades);
-                try {
-                  localStorage.setItem(CLOUD_MIGRATED_UID_STORAGE_KEY, user.uid);
-                } catch {
-                  // ignore storage errors
-                }
-                if (active) setCloudSyncStatus('synced');
-              } catch (err) {
-                if (active) {
-                  setFatalError(err instanceof Error ? err : new Error(String(err)));
-                }
-              }
-              return;
-            }
-
-            try {
-              localStorage.setItem(CLOUD_MIGRATED_UID_STORAGE_KEY, user.uid);
-            } catch {
-              // ignore storage errors
-            }
-          }
-
-          cloudIdsRef.current = nextCloudIds;
+          cloudIdsRef.current = new Set(cloudTrades.map((tr) => tr.id));
           const { bt, lv, ms } = splitTradesByCategory(cloudTrades);
           setBacktestTrades(bt);
           setLiveTrades(lv);
           setMissedTrades(ms);
-          saveTradesSafely('backtest', bt);
-          saveTradesSafely('live', lv);
-          saveTradesSafely('missed', ms);
           setCloudSyncStatus('synced');
         },
         (err) => {
@@ -461,7 +366,10 @@ export function App() {
   };
 
   const filteredBacktest = useMemo(
-    () => filterBySetupAndAsset(backtestTrades),
+    () =>
+      filterBySetupAndAsset(backtestTrades).filter(
+        (tr) => tr.category === 'backtest',
+      ),
     [backtestTrades, selectedSetup, assetFilter],
   );
   const filteredLive = useMemo(
@@ -469,12 +377,11 @@ export function App() {
       filterBySetupAndAsset(liveTrades).filter((tr) => tr.category === 'live'),
     [liveTrades, selectedSetup, assetFilter],
   );
-  const executedLiveForAdherence = useMemo(
-    () => filteredLive.filter((tr) => tr.outcome !== 'UNFILLED'),
-    [filteredLive],
-  );
   const filteredMissed = useMemo(
-    () => filterBySetupAndAsset(missedTrades),
+    () =>
+      filterBySetupAndAsset(missedTrades).filter(
+        (tr) => tr.category === 'missed',
+      ),
     [missedTrades, selectedSetup, assetFilter],
   );
 
@@ -496,9 +403,10 @@ export function App() {
     [filteredLive],
   );
 
+  // Trade Non Presi is 100% standalone and never reads from Journal Reale or Backtest
   const missedStats = useMemo(
-    () => calculateMissedStats(executedLiveForAdherence, filteredMissed),
-    [executedLiveForAdherence, filteredMissed],
+    () => calculateMissedStats(filteredMissed),
+    [filteredMissed],
   );
 
   // Earliest live trade date in Journal Reale (YYYY-MM-DD) for aligned Dashboard comparison
@@ -561,11 +469,19 @@ export function App() {
     });
   };
 
-  // Safe state + storage updaters
-  const handleSaveTrade = (
+  // Permanent Firebase Cloud persistence handlers
+  const handleSaveTrade = async (
     saved: TradeRecord,
     previousCategory?: TradeCategory,
   ) => {
+    if (!firebaseUser) {
+      throw new Error('Devi essere autenticato per salvare su Firebase.');
+    }
+
+    const isExistingInCloud = cloudIdsRef.current.has(saved.id);
+    await upsertTradeInFirestore(firebaseUser.uid, saved, isExistingInCloud);
+    cloudIdsRef.current.add(saved.id);
+
     let nextBt = backtestTrades;
     let nextLive = liveTrades;
     let nextMissed = missedTrades;
@@ -573,13 +489,10 @@ export function App() {
     if (previousCategory && previousCategory !== saved.category) {
       if (previousCategory === 'backtest') {
         nextBt = backtestTrades.filter((x) => x.id !== saved.id);
-        saveTradesSafely('backtest', nextBt);
       } else if (previousCategory === 'live') {
         nextLive = liveTrades.filter((x) => x.id !== saved.id);
-        saveTradesSafely('live', nextLive);
       } else {
         nextMissed = missedTrades.filter((x) => x.id !== saved.id);
-        saveTradesSafely('missed', nextMissed);
       }
     }
 
@@ -590,80 +503,55 @@ export function App() {
 
     if (saved.category === 'backtest') {
       nextBt = upsert(nextBt);
-      saveTradesSafely('backtest', nextBt);
     } else if (saved.category === 'live') {
       nextLive = upsert(nextLive);
-      saveTradesSafely('live', nextLive);
     } else {
       nextMissed = upsert(nextMissed);
-      saveTradesSafely('missed', nextMissed);
     }
 
     setBacktestTrades(nextBt);
     setLiveTrades(nextLive);
     setMissedTrades(nextMissed);
 
-    if (firebaseUser) {
-      const isExistingInCloud = cloudIdsRef.current.has(saved.id);
-      cloudIdsRef.current.add(saved.id);
-      void upsertTradeInFirestore(firebaseUser.uid, saved, isExistingInCloud).catch(
-        (err) => {
-          setFatalError(err instanceof Error ? err : new Error(String(err)));
-        },
-      );
-    }
-
     showToast(`${saved.asset} (${saved.setup}) — ${formatR(saved.netR)}`);
   };
 
-  const handleConfirmDelete = () => {
-    if (!deleteTarget) return;
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget || deletingSingle || !firebaseUser) return;
     const targetToDelete = deleteTarget;
-    if (targetToDelete.category === 'backtest') {
-      const next = backtestTrades.filter((x) => x.id !== targetToDelete.id);
-      setBacktestTrades(next);
-      saveTradesSafely('backtest', next);
-    } else if (targetToDelete.category === 'live') {
-      const next = liveTrades.filter((x) => x.id !== targetToDelete.id);
-      setLiveTrades(next);
-      saveTradesSafely('live', next);
-    } else {
-      const next = missedTrades.filter((x) => x.id !== targetToDelete.id);
-      setMissedTrades(next);
-      saveTradesSafely('missed', next);
-    }
-    setDeleteTarget(null);
-
-    if (firebaseUser) {
+    setDeletingSingle(true);
+    try {
+      await deleteTradeInFirestore(firebaseUser.uid, targetToDelete.id);
       cloudIdsRef.current.delete(targetToDelete.id);
-      void deleteTradeInFirestore(firebaseUser.uid, targetToDelete.id).catch(
-        (err) => {
-          setFatalError(err instanceof Error ? err : new Error(String(err)));
-        },
-      );
+
+      if (targetToDelete.category === 'backtest') {
+        setBacktestTrades((prev) => prev.filter((x) => x.id !== targetToDelete.id));
+      } else if (targetToDelete.category === 'live') {
+        setLiveTrades((prev) => prev.filter((x) => x.id !== targetToDelete.id));
+      } else {
+        setMissedTrades((prev) => prev.filter((x) => x.id !== targetToDelete.id));
+      }
+      setDeleteTarget(null);
+    } catch (err) {
+      setFatalError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setDeletingSingle(false);
     }
   };
 
   const handleImportTrades = async (imported: TradeRecord[]) => {
-    let existingPool: TradeRecord[] =
-      importCategory === 'backtest'
-        ? [...backtestTrades]
-        : importCategory === 'missed'
-          ? [...missedTrades]
-          : [...liveTrades];
+    if (!firebaseUser) {
+      showToast('Errore: effettua il login per importare su Firebase.');
+      return;
+    }
 
-    if (firebaseUser) {
-      try {
-        const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
-        const dbPool = dbTrades.filter((tr) => tr.category === importCategory);
-        const byId = new Map<string, TradeRecord>();
-        dbPool.forEach((tr) => byId.set(tr.id, tr));
-        existingPool.forEach((tr) => byId.set(tr.id, tr));
-        existingPool = Array.from(byId.values());
-      } catch (err) {
-        setFatalError(err instanceof Error ? err : new Error(String(err)));
-        return;
-      }
+    let existingPool: TradeRecord[] = [];
+    try {
+      const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
+      existingPool = dbTrades.filter((tr) => tr.category === importCategory);
+    } catch (err) {
+      setFatalError(err instanceof Error ? err : new Error(String(err)));
+      return;
     }
 
     const { addedTrades, skippedDuplicates } = deduplicateImportedTrades(
@@ -680,9 +568,6 @@ export function App() {
           category: 'missed' as const,
           isMissed: true,
         }));
-        const next = [...missedTrades, ...normalizedMissed];
-        setMissedTrades(next);
-        saveTradesSafely('missed', next);
         tradesToSyncCloud.push(...normalizedMissed);
       } else if (importCategory === 'backtest') {
         const normalizedBt = addedTrades.map((t) => ({
@@ -691,9 +576,6 @@ export function App() {
           isMissed: false,
           missedReason: undefined,
         }));
-        const next = [...backtestTrades, ...normalizedBt];
-        setBacktestTrades(next);
-        saveTradesSafely('backtest', next);
         tradesToSyncCloud.push(...normalizedBt);
       } else {
         const normalizedLive = addedTrades.map((t) => ({
@@ -702,20 +584,23 @@ export function App() {
           isMissed: false,
           missedReason: undefined,
         }));
-        const next = [...liveTrades, ...normalizedLive];
-        setLiveTrades(next);
-        saveTradesSafely('live', next);
         tradesToSyncCloud.push(...normalizedLive);
       }
-    }
 
-    if (firebaseUser && tradesToSyncCloud.length > 0) {
-      tradesToSyncCloud.forEach((tr) => cloudIdsRef.current.add(tr.id));
       try {
         await batchCreateTradesInFirestore(firebaseUser.uid, tradesToSyncCloud);
+        tradesToSyncCloud.forEach((tr) => cloudIdsRef.current.add(tr.id));
       } catch (err) {
         setFatalError(err instanceof Error ? err : new Error(String(err)));
         return;
+      }
+
+      if (importCategory === 'missed') {
+        setMissedTrades((prev) => [...prev, ...tradesToSyncCloud]);
+      } else if (importCategory === 'backtest') {
+        setBacktestTrades((prev) => [...prev, ...tradesToSyncCloud]);
+      } else {
+        setLiveTrades((prev) => [...prev, ...tradesToSyncCloud]);
       }
     }
 
@@ -918,25 +803,13 @@ export function App() {
       };
 
       if (addedBt.length > 0) {
-        setBacktestTrades((prev) => {
-          const next = appendUniqueById(prev, addedBt);
-          saveTradesSafely('backtest', next);
-          return next;
-        });
+        setBacktestTrades((prev) => appendUniqueById(prev, addedBt));
       }
       if (addedLive.length > 0) {
-        setLiveTrades((prev) => {
-          const next = appendUniqueById(prev, addedLive);
-          saveTradesSafely('live', next);
-          return next;
-        });
+        setLiveTrades((prev) => appendUniqueById(prev, addedLive));
       }
       if (addedMissed.length > 0) {
-        setMissedTrades((prev) => {
-          const next = appendUniqueById(prev, addedMissed);
-          saveTradesSafely('missed', next);
-          return next;
-        });
+        setMissedTrades((prev) => appendUniqueById(prev, addedMissed));
       }
 
       showToast(outcome.message, 8000);
@@ -1029,25 +902,13 @@ export function App() {
     };
 
     if (allAddedBt.length > 0) {
-      setBacktestTrades((prev) => {
-        const next = appendUniqueById(prev, allAddedBt);
-        saveTradesSafely('backtest', next);
-        return next;
-      });
+      setBacktestTrades((prev) => appendUniqueById(prev, allAddedBt));
     }
     if (allAddedLive.length > 0) {
-      setLiveTrades((prev) => {
-        const next = appendUniqueById(prev, allAddedLive);
-        saveTradesSafely('live', next);
-        return next;
-      });
+      setLiveTrades((prev) => appendUniqueById(prev, allAddedLive));
     }
     if (allAddedMissed.length > 0) {
-      setMissedTrades((prev) => {
-        const next = appendUniqueById(prev, allAddedMissed);
-        saveTradesSafely('missed', next);
-        return next;
-      });
+      setMissedTrades((prev) => appendUniqueById(prev, allAddedMissed));
     }
 
     const totalAdded = outcomes.reduce((s, o) => s + o.added, 0);
@@ -1147,15 +1008,12 @@ export function App() {
 
       if (targetCategories.includes('backtest')) {
         setBacktestTrades(keptByCategory.backtest);
-        saveTradesSafely('backtest', keptByCategory.backtest);
       }
       if (targetCategories.includes('live')) {
         setLiveTrades(keptByCategory.live);
-        saveTradesSafely('live', keptByCategory.live);
       }
       if (targetCategories.includes('missed')) {
         setMissedTrades(keptByCategory.missed);
-        saveTradesSafely('missed', keptByCategory.missed);
       }
 
       const remainingCount = targetCategories.reduce(
@@ -1182,7 +1040,7 @@ export function App() {
     cat === 'backtest' ? t.nav.backtest : cat === 'live' ? t.nav.live : t.nav.missed;
 
   const handleConfirmResetSection = async () => {
-    if (!resetSectionTarget || resettingSection) return;
+    if (!resetSectionTarget || resettingSection || !firebaseUser) return;
     const targetCategory = resetSectionTarget;
     const sectionLabel = getSectionDisplayName(targetCategory);
     setResettingSection(true);
@@ -1197,39 +1055,26 @@ export function App() {
 
       const idsSet = new Set<string>(localSectionTrades.map((tr) => tr.id));
 
-      if (firebaseUser) {
-        const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
-        dbTrades.forEach((tr) => {
-          if (tr.category === targetCategory) {
-            idsSet.add(tr.id);
-          }
-        });
-      }
+      const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
+      dbTrades.forEach((tr) => {
+        if (tr.category === targetCategory) {
+          idsSet.add(tr.id);
+        }
+      });
 
       const idsToDelete = Array.from(idsSet);
 
-      if (firebaseUser && idsToDelete.length > 0) {
+      if (idsToDelete.length > 0) {
         await batchDeleteTradesInFirestore(firebaseUser.uid, idsToDelete);
         idsToDelete.forEach((id) => cloudIdsRef.current.delete(id));
       }
 
-      if (firebaseUser) {
-        try {
-          localStorage.setItem(CLOUD_MIGRATED_UID_STORAGE_KEY, firebaseUser.uid);
-        } catch {
-          // ignore storage errors
-        }
-      }
-
       if (targetCategory === 'backtest') {
         setBacktestTrades([]);
-        saveTradesSafely('backtest', []);
       } else if (targetCategory === 'live') {
         setLiveTrades([]);
-        saveTradesSafely('live', []);
       } else {
         setMissedTrades([]);
-        saveTradesSafely('missed', []);
       }
 
       setResetSectionTarget(null);
@@ -1260,257 +1105,8 @@ export function App() {
     }
   };
 
-  const loadDemoTrades = (target: TradeCategory) => {
-    const today = new Date();
-    const offsetIso = (daysAgo: number) => {
-      const d = new Date(today);
-      d.setDate(d.getDate() - daysAgo);
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    };
-
-    if (target === 'backtest') {
-      const samples: TradeRecord[] = [
-        runRowCalculationEngine({
-          id: generateTradeId('bt'),
-          category: 'backtest',
-          date: offsetIso(28),
-          asset: 'CAD/CHF',
-          setup: 'S1',
-          strategy: 'S1',
-          bias: 'LONG',
-          riskPct: 1,
-          entryPrice: 0.642,
-          slPrice: 0.6405,
-          tpPrice: 0.6465,
-          outcome: 'STOP LOSS',
-          netR: -3.0,
-          netReturnPct: -3.0,
-          notes: 'Drawdown backtest settimana 1',
-          createdAt: Date.now() + 1,
-        }),
-        runRowCalculationEngine({
-          id: generateTradeId('bt'),
-          category: 'backtest',
-          date: offsetIso(28),
-          asset: 'CHF/JPY',
-          setup: 'S1',
-          strategy: 'S1',
-          bias: 'SHORT',
-          riskPct: 1,
-          entryPrice: 171.4,
-          slPrice: 171.65,
-          tpPrice: 170.65,
-          outcome: 'STOP LOSS',
-          netR: -3.0,
-          netReturnPct: -3.0,
-          notes: 'Drawdown backtest settimana 1',
-          createdAt: Date.now() + 2,
-        }),
-        runRowCalculationEngine({
-          id: generateTradeId('bt'),
-          category: 'backtest',
-          date: offsetIso(21),
-          asset: 'CAD/CHF',
-          setup: 'SSA',
-          strategy: 'SSA',
-          bias: 'LONG',
-          riskPct: 1,
-          entryPrice: 0.641,
-          slPrice: 0.6395,
-          tpPrice: 0.6455,
-          outcome: 'STOP LOSS',
-          netR: -3.0,
-          netReturnPct: -3.0,
-          notes: 'Drawdown backtest settimana 2',
-          createdAt: Date.now() + 3,
-        }),
-        runRowCalculationEngine({
-          id: generateTradeId('bt'),
-          category: 'backtest',
-          date: offsetIso(21),
-          asset: 'CHF/JPY',
-          setup: 'SSA',
-          strategy: 'SSA',
-          bias: 'LONG',
-          riskPct: 1,
-          entryPrice: 170.8,
-          slPrice: 170.55,
-          tpPrice: 171.8,
-          outcome: 'STOP LOSS',
-          netR: -3.0,
-          netReturnPct: -3.0,
-          notes: 'Drawdown backtest settimana 2',
-          createdAt: Date.now() + 4,
-        }),
-        runRowCalculationEngine({
-          id: generateTradeId('bt'),
-          category: 'backtest',
-          date: offsetIso(10),
-          asset: 'CAD/CHF',
-          setup: 'MUT',
-          strategy: 'MUT',
-          bias: 'LONG',
-          riskPct: 1,
-          entryPrice: 0.645,
-          slPrice: 0.6435,
-          tpPrice: 0.651,
-          outcome: 'TP',
-          netR: 4.0,
-          netReturnPct: 4.0,
-          notes: 'TP pieno su continuazione sessione Londra',
-          createdAt: Date.now() + 5,
-        }),
-        runRowCalculationEngine({
-          id: generateTradeId('bt'),
-          category: 'backtest',
-          date: offsetIso(5),
-          asset: 'XAU/USD',
-          setup: 'SBIL DOMINANCE REALE',
-          strategy: 'SBIL DOMINANCE REALE',
-          bias: 'LONG',
-          riskPct: 1,
-          entryPrice: 2680.0,
-          slPrice: 2675.0,
-          tpPrice: 2700.0,
-          outcome: 'TP',
-          netR: 4.0,
-          netReturnPct: 4.0,
-          notes: 'Presa liquidità e sbilanciamento pulito',
-          createdAt: Date.now() + 6,
-        }),
-      ];
-      const next = [...backtestTrades, ...samples];
-      setBacktestTrades(next);
-      saveTradesSafely('backtest', next);
-      if (firebaseUser) {
-        samples.forEach((tr) => cloudIdsRef.current.add(tr.id));
-        void batchCreateTradesInFirestore(firebaseUser.uid, samples).catch((err) => {
-          setFatalError(err instanceof Error ? err : new Error(String(err)));
-        });
-      }
-      showToast('+6 operazioni di esempio aggiunte al Backtest');
-    } else if (target === 'live') {
-      const samples: TradeRecord[] = [
-        runRowCalculationEngine({
-          id: generateTradeId('lv'),
-          category: 'live',
-          date: offsetIso(12),
-          asset: 'EUR/USD',
-          setup: 'S1',
-          strategy: 'S1',
-          bias: 'LONG',
-          riskPct: 1,
-          entryPrice: 1.084,
-          slPrice: 1.0825,
-          tpPrice: 1.0885,
-          outcome: 'TP',
-          netR: 3.0,
-          netReturnPct: 3.0,
-          notes: 'Eseguito in apertura sessione',
-          createdAt: Date.now() + 10,
-        }),
-        runRowCalculationEngine({
-          id: generateTradeId('lv'),
-          category: 'live',
-          date: offsetIso(7),
-          asset: 'CHF/JPY',
-          setup: 'SSA',
-          strategy: 'SSA',
-          bias: 'SHORT',
-          riskPct: 1,
-          entryPrice: 171.8,
-          slPrice: 172.05,
-          tpPrice: 171.05,
-          outcome: 'STOP LOSS',
-          netR: -1.0,
-          netReturnPct: -1.0,
-          notes: 'Stop loss meccanico rispettato',
-          createdAt: Date.now() + 11,
-        }),
-        runRowCalculationEngine({
-          id: generateTradeId('lv'),
-          category: 'live',
-          date: offsetIso(3),
-          asset: 'US30',
-          setup: 'MUT',
-          strategy: 'MUT',
-          bias: 'LONG',
-          riskPct: 1,
-          entryPrice: 43120,
-          slPrice: 43070,
-          tpPrice: 43295,
-          outcome: 'TP',
-          netR: 3.5,
-          netReturnPct: 3.5,
-          notes: 'Trigger meccanico apertura NY',
-          createdAt: Date.now() + 12,
-        }),
-      ];
-      const next = [...liveTrades, ...samples];
-      setLiveTrades(next);
-      saveTradesSafely('live', next);
-      if (firebaseUser) {
-        samples.forEach((tr) => cloudIdsRef.current.add(tr.id));
-        void batchCreateTradesInFirestore(firebaseUser.uid, samples).catch((err) => {
-          setFatalError(err instanceof Error ? err : new Error(String(err)));
-        });
-      }
-      showToast('+3 operazioni di esempio aggiunte al Journal Reale');
-    } else {
-      const samples: TradeRecord[] = [
-        runRowCalculationEngine({
-          id: generateTradeId('ms'),
-          category: 'missed',
-          date: offsetIso(9),
-          asset: 'EUR/USD',
-          setup: 'S1',
-          strategy: 'S1',
-          bias: 'SHORT',
-          riskPct: 1,
-          outcome: 'TP',
-          netR: 3.0,
-          netReturnPct: 3.0,
-          missedReason: 'Esitazione / Paura',
-          notes: 'Esitazione dopo stop precedente',
-          createdAt: Date.now() + 20,
-        }),
-        runRowCalculationEngine({
-          id: generateTradeId('ms'),
-          category: 'missed',
-          date: offsetIso(4),
-          asset: 'NASDAQ',
-          setup: 'SBIL INTRADOMINANCE',
-          strategy: 'SBIL INTRADOMINANCE',
-          bias: 'LONG',
-          riskPct: 1,
-          outcome: 'TP',
-          netR: 2.5,
-          netReturnPct: 2.5,
-          missedReason: 'Ordine Non Fillato',
-          notes: 'Prezzo ripartito a 1.5 punti dal limit',
-          createdAt: Date.now() + 21,
-        }),
-      ];
-      const next = [...missedTrades, ...samples];
-      setMissedTrades(next);
-      saveTradesSafely('missed', next);
-      if (firebaseUser) {
-        samples.forEach((tr) => cloudIdsRef.current.add(tr.id));
-        void batchCreateTradesInFirestore(firebaseUser.uid, samples).catch((err) => {
-          setFatalError(err instanceof Error ? err : new Error(String(err)));
-        });
-      }
-      showToast('+2 operazioni di esempio aggiunte ai Trade Non Presi');
-    }
-  };
-
   const handleOpenGeminiReview = async () => {
-    const payload = buildGeminiReviewPrompt(
-      liveStats,
-      missedStats,
-      filteredLive,
-      filteredMissed,
-    );
+    const payload = buildGeminiReviewPrompt(liveStats, filteredLive);
     setGeminiState({
       isOpen: true,
       loading: true,
@@ -1876,36 +1472,35 @@ export function App() {
                       liveDedup.skippedDuplicates +
                       missedDedup.skippedDuplicates;
 
-                    if (addedBt.length > 0) {
-                      const nextBt = [...backtestTrades, ...addedBt];
-                      setBacktestTrades(nextBt);
-                      saveTradesSafely('backtest', nextBt);
-                    }
-                    if (addedLive.length > 0) {
-                      const nextLive = [...liveTrades, ...addedLive];
-                      setLiveTrades(nextLive);
-                      saveTradesSafely('live', nextLive);
-                    }
-                    if (addedMissed.length > 0) {
-                      const nextMissed = [...missedTrades, ...addedMissed];
-                      setMissedTrades(nextMissed);
-                      saveTradesSafely('missed', nextMissed);
+                    if (!firebaseUser) {
+                      showToast('Devi essere autenticato per importare su Firebase.');
+                      return;
                     }
 
                     const allNewToCloud = [...addedBt, ...addedLive, ...addedMissed];
-                    if (firebaseUser && allNewToCloud.length > 0) {
-                      allNewToCloud.forEach((tr) => cloudIdsRef.current.add(tr.id));
+                    if (allNewToCloud.length > 0) {
                       try {
                         await batchCreateTradesInFirestore(
                           firebaseUser.uid,
                           allNewToCloud,
                         );
+                        allNewToCloud.forEach((tr) => cloudIdsRef.current.add(tr.id));
                       } catch (err) {
                         setFatalError(
                           err instanceof Error ? err : new Error(String(err)),
                         );
                         return;
                       }
+                    }
+
+                    if (addedBt.length > 0) {
+                      setBacktestTrades((prev) => [...prev, ...addedBt]);
+                    }
+                    if (addedLive.length > 0) {
+                      setLiveTrades((prev) => [...prev, ...addedLive]);
+                    }
+                    if (addedMissed.length > 0) {
+                      setMissedTrades((prev) => [...prev, ...addedMissed]);
                     }
 
                     showToast(
@@ -2417,7 +2012,6 @@ export function App() {
                 setTradeModalCategory('backtest');
                 setTradeModalOpen(true);
               }}
-              onLoadDemo={() => loadDemoTrades('backtest')}
               onEdit={(tr) => {
                 setEditingTrade(tr);
                 setTradeModalOpen(true);
@@ -2556,7 +2150,6 @@ export function App() {
                 setTradeModalCategory('live');
                 setTradeModalOpen(true);
               }}
-              onLoadDemo={() => loadDemoTrades('live')}
               onEdit={(tr) => {
                 setEditingTrade(tr);
                 setTradeModalOpen(true);
@@ -2566,7 +2159,7 @@ export function App() {
           </div>
         ) : null}
 
-        {/* TAB 4: TRADE NON PRESI / MISSED TRADES */}
+        {/* TAB 4: TRADE NON PRESI / MISSED TRADES (100% Standalone Log) */}
         {activeTab === 'missed' ? (
           <div className="space-y-6">
             <div>
@@ -2578,7 +2171,7 @@ export function App() {
               </p>
             </div>
 
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="rounded-lg border border-[#1E2634] bg-[#121721] p-5">
                 <div className="text-xs font-medium text-slate-400">
                   {t.journal.missedTotal}
@@ -2616,28 +2209,6 @@ export function App() {
                 </div>
                 <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
                   TP: {formatR(missedStats.missedWinR)} · SL: {formatR(missedStats.avoidedLossR)}
-                </div>
-              </div>
-
-              <div className="rounded-lg border border-[#1E2634] bg-[#121721] p-5">
-                <div className="text-xs font-medium text-slate-400">
-                  {t.journal.adherencePct}
-                </div>
-                <div
-                  className={`mt-2 font-mono text-2xl font-bold tabular-nums ${
-                    missedStats.totalSignals === 0
-                      ? 'text-slate-300'
-                      : missedStats.adherenceScorePct >= 80
-                        ? 'text-emerald-400'
-                        : missedStats.adherenceScorePct >= 60
-                          ? 'text-amber-400'
-                          : 'text-rose-400'
-                  }`}
-                >
-                  {missedStats.adherenceScorePct.toFixed(1)}%
-                </div>
-                <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
-                  {missedStats.executedCount} / {missedStats.totalSignals}
                 </div>
               </div>
             </div>
@@ -2734,7 +2305,6 @@ export function App() {
                 setTradeModalCategory('missed');
                 setTradeModalOpen(true);
               }}
-              onLoadDemo={() => loadDemoTrades('missed')}
               onEdit={(tr) => {
                 setEditingTrade(tr);
                 setTradeModalOpen(true);
@@ -2805,9 +2375,12 @@ export function App() {
       <ConfirmModal
         isOpen={deleteTarget !== null}
         message={t.confirm.deleteMessage}
+        isBusy={deletingSingle}
         t={t}
-        onCancel={() => setDeleteTarget(null)}
-        onConfirm={handleConfirmDelete}
+        onCancel={() => {
+          if (!deletingSingle) setDeleteTarget(null);
+        }}
+        onConfirm={() => void handleConfirmDelete()}
       />
 
       <ConfirmModal

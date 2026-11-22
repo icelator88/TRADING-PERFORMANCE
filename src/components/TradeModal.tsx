@@ -24,7 +24,7 @@ interface TradeModalProps {
   customSetups: string[];
   t: TranslationSet;
   onClose: () => void;
-  onSave: (trade: TradeRecord, previousCategory?: TradeCategory) => void;
+  onSave: (trade: TradeRecord, previousCategory?: TradeCategory) => void | Promise<void>;
 }
 
 export function TradeModal({
@@ -51,6 +51,8 @@ export function TradeModal({
   const [missedReason, setMissedReason] = useState<string>(MISSED_REASONS[0]);
   const [notes, setNotes] = useState('');
   const [tradingViewUrl, setTradingViewUrl] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
   useEffect(() => {
     if (!isOpen) return;
@@ -87,6 +89,8 @@ export function TradeModal({
       setNotes('');
       setTradingViewUrl('');
     }
+    setSaving(false);
+    setSaveError('');
   }, [isOpen, editingTrade, initialCategory]);
 
   if (!isOpen) return null;
@@ -118,9 +122,9 @@ export function TradeModal({
     createdAt: editingTrade?.createdAt || Date.now(),
   });
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!date || !asset.trim()) return;
+    if (saving || !date || !asset.trim()) return;
 
     const trimmedNotes = notes.trim();
     const effectiveCategory: TradeCategory = category;
@@ -143,8 +147,18 @@ export function TradeModal({
       createdAt: editingTrade?.createdAt || Date.now(),
     });
 
-    onSave(finalRecord, editingTrade?.category);
-    onClose();
+    setSaving(true);
+    setSaveError('');
+    try {
+      await onSave(finalRecord, editingTrade?.category);
+      onClose();
+    } catch (err) {
+      setSaveError(
+        err instanceof Error ? err.message : 'Errore nel salvataggio su Firebase.',
+      );
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -430,19 +444,31 @@ export function TradeModal({
             </div>
           </div>
 
+          {saveError ? (
+            <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+              {saveError}
+            </div>
+          ) : null}
+
           <div className="flex items-center justify-end gap-3 border-t border-[#1E2634] pt-4">
             <button
               type="button"
+              disabled={saving}
               onClick={onClose}
-              className="rounded-md border border-[#263042] px-4 py-2 font-medium text-slate-300 hover:bg-[#1B2230]"
+              className="rounded-md border border-[#263042] px-4 py-2 font-medium text-slate-300 hover:bg-[#1B2230] disabled:opacity-50"
             >
               {t.modal.cancel}
             </button>
             <button
               type="submit"
-              className="rounded-md bg-sky-600 px-5 py-2 font-semibold text-white hover:bg-sky-500"
+              disabled={saving}
+              className="rounded-md bg-sky-600 px-5 py-2 font-semibold text-white hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {editingTrade ? t.modal.saveChanges : t.modal.save}
+              {saving
+                ? 'Salvataggio Firebase...'
+                : editingTrade
+                  ? t.modal.saveChanges
+                  : t.modal.save}
             </button>
           </div>
         </form>

@@ -501,7 +501,6 @@ export function calculatePerformanceStats(trades: TradeRecord[]): PerformanceSta
 }
 
 export function calculateMissedStats(
-  executedLiveTrades: TradeRecord[],
   missedTrades: TradeRecord[],
 ): MissedStats {
   let theoreticalWins = 0;
@@ -541,11 +540,7 @@ export function calculateMissedStats(
     reasonMap[reasonKey].impactR = roundTo(reasonMap[reasonKey].impactR + r, 2);
   });
 
-  const executedCount = executedLiveTrades.length;
   const totalMissed = missedTrades.length;
-  const totalSignals = executedCount + totalMissed;
-  const adherenceScorePct =
-    totalSignals > 0 ? roundTo((executedCount / totalSignals) * 100, 1) : 0;
   const executedMissedRelevant = theoreticalWins + avoidedLosses + theoreticalBE;
   const theoreticalWinRatePct =
     executedMissedRelevant > 0
@@ -554,8 +549,6 @@ export function calculateMissedStats(
 
   return {
     totalMissed,
-    executedCount,
-    totalSignals,
     theoreticalWins,
     avoidedLosses,
     theoreticalBE,
@@ -564,7 +557,6 @@ export function calculateMissedStats(
     theoreticalNetR,
     missedWinR,
     avoidedLossR,
-    adherenceScorePct,
     reasonBreakdown: Object.values(reasonMap),
   };
 }

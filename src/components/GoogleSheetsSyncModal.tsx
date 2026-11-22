@@ -95,11 +95,15 @@ export function GoogleSheetsSyncModal({
   const [outcomesById, setOutcomesById] = useState<
     Record<string, AssetSyncOutcome>
   >({});
+  const [pendingConfirm, setPendingConfirm] = useState<
+    { type: 'single'; source: GoogleSheetSource } | { type: 'all' } | null
+  >(null);
 
   useEffect(() => {
     if (isOpen) {
       setCategoryInput(defaultCategory);
       setFormError('');
+      setPendingConfirm(null);
     }
   }, [isOpen, defaultCategory]);
 
@@ -400,7 +404,7 @@ export function GoogleSheetsSyncModal({
 
               <button
                 type="button"
-                onClick={() => void handleMasterSyncAll()}
+                onClick={() => setPendingConfirm({ type: 'all' })}
                 disabled={isBusy || sources.length === 0}
                 className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-45"
               >
@@ -479,7 +483,7 @@ export function GoogleSheetsSyncModal({
                         <div className="flex items-center gap-2 shrink-0">
                           <button
                             type="button"
-                            onClick={() => void handleSingleSync(src)}
+                            onClick={() => setPendingConfirm({ type: 'single', source: src })}
                             disabled={isBusy}
                             className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-45"
                           >
@@ -566,6 +570,71 @@ export function GoogleSheetsSyncModal({
           </button>
         </div>
       </div>
+
+      {pendingConfirm ? (
+        <div
+          className="fixed inset-0 z-60 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="gsheets-confirm-title"
+        >
+          <div className="w-full max-w-md rounded-lg border border-[#263042] bg-[#121721] p-6 shadow-2xl">
+            <h3 id="gsheets-confirm-title" className="text-base font-semibold text-slate-100">
+              {lang === 'en'
+                ? 'Confirm Google Sheets Sync'
+                : lang === 'es'
+                  ? 'Confirmar sincronización con Google Sheets'
+                  : 'Conferma Sincronizzazione Google Sheets'}
+            </h3>
+            <p className="mt-2 text-xs leading-relaxed text-slate-300">
+              {lang === 'en'
+                ? 'Are you sure you want to overwrite current data with Google Sheets?'
+                : lang === 'es'
+                  ? '¿Estás seguro de que deseas sobrescribir los datos actuales con Google Sheets?'
+                  : 'Sei sicuro di voler aggiornare e sovrascrivere i dati attuali con Google Sheets?'}
+              {pendingConfirm.type === 'single' ? (
+                <span className="mt-2 block font-mono text-[11px] text-sky-300">
+                  {pendingConfirm.source.asset} (
+                  {pendingConfirm.source.category === 'live'
+                    ? 'Journal Reale'
+                    : pendingConfirm.source.category === 'missed'
+                      ? 'Trade Non Presi'
+                      : 'Backtest'}
+                  )
+                </span>
+              ) : (
+                <span className="mt-2 block font-mono text-[11px] text-sky-300">
+                  {sources.length} {lang === 'en' ? 'saved sheets' : 'fogli salvati'}
+                </span>
+              )}
+            </p>
+            <div className="mt-6 flex items-center justify-end gap-3 border-t border-[#1E2634] pt-4">
+              <button
+                type="button"
+                onClick={() => setPendingConfirm(null)}
+                className="rounded-md border border-[#263042] px-4 py-2 text-xs font-medium text-slate-300 transition-colors hover:bg-[#1B2230]"
+              >
+                {lang === 'en' ? 'Cancel' : lang === 'es' ? 'Cancelar' : 'Annulla'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = pendingConfirm;
+                  setPendingConfirm(null);
+                  if (target.type === 'single') {
+                    void handleSingleSync(target.source);
+                  } else {
+                    void handleMasterSyncAll();
+                  }
+                }}
+                className="rounded-md bg-emerald-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-emerald-500"
+              >
+                {lang === 'en' ? 'Confirm Sync' : lang === 'es' ? 'Confirmar' : 'Conferma Sync'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

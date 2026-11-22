@@ -140,8 +140,6 @@ export interface PerformanceStats {
 
 export interface MissedStats {
   totalMissed: number;
-  executedCount: number;
-  totalSignals: number;
   theoreticalWins: number;
   avoidedLosses: number;
   theoreticalBE: number;
@@ -150,7 +148,6 @@ export interface MissedStats {
   theoreticalNetR: number;
   missedWinR: number;
   avoidedLossR: number;
-  adherenceScorePct: number;
   reasonBreakdown: {
     reason: string;
     count: number;
