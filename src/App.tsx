@@ -11,6 +11,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
+import { AiDisciplineCoachCard } from './components/AiDisciplineCoachCard';
 import { AkinatorCard } from './components/AkinatorCard';
 import { ConfirmModal } from './components/ConfirmModal';
 import { DrawdownChart } from './components/DrawdownChart';
@@ -1807,6 +1808,29 @@ export function App() {
                 </div>
               </div>
             </section>
+
+            {/* AI Discipline & Execution Coach (Dashboard-only Gemini diagnostic) */}
+            <AiDisciplineCoachCard
+              lang={lang}
+              assetFilter={assetFilter}
+              selectedSetup={selectedSetup}
+              rangeMode={dashboardRangeMode}
+              liveStartDate={liveStartDate}
+              liveStats={liveStats}
+              backtestStats={dashboardBacktestStats}
+              liveTrades={filteredLive}
+              backtestTrades={dashboardBacktestTrades}
+              missedTrades={
+                isLiveAligned && liveStartDate
+                  ? filteredMissed.filter((tr) => {
+                      const assetStart =
+                        liveStartDateByAsset.get(tr.asset.trim().toUpperCase()) ??
+                        liveStartDate;
+                      return tr.date >= assetStart;
+                    })
+                  : filteredMissed
+              }
+            />
 
             {/* Dual Date-Aligned Equity Curve */}
             <EquityChart
