@@ -32,6 +32,7 @@ interface GoogleSheetsSyncModalProps {
   defaultCategory: TradeCategory;
   sources: GoogleSheetSource[];
   knownAssets: string[];
+  customAssets?: string[];
   onClose: () => void;
   onAddSource: (source: GoogleSheetSource) => Promise<void>;
   onDeleteSource: (source: GoogleSheetSource) => Promise<void>;
@@ -39,6 +40,7 @@ interface GoogleSheetsSyncModalProps {
   onSyncAll: (
     onProgress?: (currentIndex: number, total: number, asset: string) => void,
   ) => Promise<AssetSyncOutcome[]>;
+  onOpenNewAssetModal?: (prefillAsset?: string) => void;
 }
 
 const COMMON_ASSETS = [
@@ -75,11 +77,13 @@ export function GoogleSheetsSyncModal({
   defaultCategory,
   sources,
   knownAssets,
+  customAssets = [],
   onClose,
   onAddSource,
   onDeleteSource,
   onSyncSingle,
   onSyncAll,
+  onOpenNewAssetModal,
 }: GoogleSheetsSyncModalProps) {
   const [assetInput, setAssetInput] = useState('');
   const [urlInput, setUrlInput] = useState('');
@@ -111,8 +115,12 @@ export function GoogleSheetsSyncModal({
 
   const isBusy = savingSource || syncingAll || syncingId !== null || deletingId !== null;
   const assetSuggestions = Array.from(
-    new Set([...knownAssets, ...COMMON_ASSETS]),
+    new Set([...knownAssets, ...customAssets, ...COMMON_ASSETS]),
   ).sort();
+  const linkedAssetSet = new Set(sources.map((s) => s.asset.trim().toUpperCase()));
+  const unlinkedCustomAssets = customAssets
+    .map((a) => a.trim().toUpperCase())
+    .filter((a) => a.length > 0 && !linkedAssetSet.has(a));
 
   const handleAddSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -302,13 +310,26 @@ export function GoogleSheetsSyncModal({
             onSubmit={handleAddSubmit}
             className="rounded-lg border border-[#1E2634] bg-[#0B0E14] p-4"
           >
-            <div className="mb-3 flex items-center justify-between">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
                 Aggiungi Collegamento Asset
               </h3>
-              <span className="font-mono text-[10px] text-slate-500">
-                Salvataggio cloud Firebase
-              </span>
+              <div className="flex items-center gap-2.5">
+                {onOpenNewAssetModal ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenNewAssetModal()}
+                    disabled={isBusy}
+                    className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/10 px-2.5 py-1 text-[11px] font-semibold text-sky-300 transition-colors hover:bg-sky-500/20 disabled:opacity-50"
+                  >
+                    <Plus className="h-3 w-3" />
+                    <span>Nuovo Asset</span>
+                  </button>
+                ) : null}
+                <span className="font-mono text-[10px] text-slate-500">
+                  Salvataggio cloud Firebase
+                </span>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
@@ -417,7 +438,7 @@ export function GoogleSheetsSyncModal({
               </button>
             </div>
 
-            {sources.length === 0 ? (
+            {sources.length === 0 && unlinkedCustomAssets.length === 0 ? (
               <div className="rounded-lg border border-dashed border-[#263042] bg-[#0B0E14] px-4 py-8 text-center text-slate-400">
                 Nessun Google Sheet salvato. Aggiungi il primo Asset qui sopra (es.{' '}
                 <span className="font-mono text-slate-200">CHF/JPY</span>,{' '}
@@ -426,6 +447,36 @@ export function GoogleSheetsSyncModal({
               </div>
             ) : (
               <div className="space-y-2.5">
+                {unlinkedCustomAssets.map((assetName) => (
+                  <div
+                    key={`unlinked-${assetName}`}
+                    className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed border-[#263042] bg-[#0B0E14] p-3.5"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded border border-sky-500/35 bg-sky-500/10 px-2 py-0.5 font-mono text-xs font-semibold text-sky-300">
+                        {assetName}
+                      </span>
+                      <span className="rounded border border-[#263042] bg-[#121721] px-2 py-0.5 text-[10px] font-medium text-slate-400">
+                        Asset registrato · Nessun URL Google Sheet collegato
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() => {
+                        if (onOpenNewAssetModal) {
+                          onOpenNewAssetModal(assetName);
+                        } else {
+                          setAssetInput(assetName);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-sky-500/35 bg-sky-500/10 px-3 py-1.5 text-xs font-semibold text-sky-300 transition-colors hover:bg-sky-500/20 disabled:opacity-45"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Collega URL Sheet
+                    </button>
+                  </div>
+                ))}
                 {sources.map((src) => {
                   const outcome = outcomesById[src.id];
                   const isThisSyncing = syncingId === src.id;

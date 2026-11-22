@@ -22,16 +22,31 @@ interface TradeModalProps {
   initialCategory: TradeCategory;
   editingTrade: TradeRecord | null;
   customSetups: string[];
+  knownAssets?: string[];
   t: TranslationSet;
   onClose: () => void;
   onSave: (trade: TradeRecord, previousCategory?: TradeCategory) => void | Promise<void>;
 }
+
+const DEFAULT_MODAL_ASSETS = [
+  'CAD/CHF',
+  'AUD/JPY',
+  'CHF/JPY',
+  'EUR/USD',
+  'GBP/USD',
+  'USD/CHF',
+  'XAU/USD',
+  'US30',
+  'NASDAQ',
+  'BTC',
+];
 
 export function TradeModal({
   isOpen,
   initialCategory,
   editingTrade,
   customSetups,
+  knownAssets = [],
   t,
   onClose,
   onSave,
@@ -226,15 +241,16 @@ export function TradeModal({
                 className="w-full rounded-md border border-[#263042] bg-[#0B0E14] px-3 py-2 font-mono uppercase text-slate-100"
               />
               <datalist id="modal-asset-list">
-                <option value="CAD/CHF" />
-                <option value="AUD/JPY" />
-                <option value="CHF/JPY" />
-                <option value="EUR/USD" />
-                <option value="GBP/USD" />
-                <option value="XAU/USD" />
-                <option value="US30" />
-                <option value="NASDAQ" />
-                <option value="BTC" />
+                {Array.from(
+                  new Set([
+                    ...knownAssets.map((a) => a.trim().toUpperCase()).filter(Boolean),
+                    ...DEFAULT_MODAL_ASSETS,
+                  ]),
+                )
+                  .sort()
+                  .map((sym) => (
+                    <option key={sym} value={sym} />
+                  ))}
               </datalist>
             </div>
           </div>

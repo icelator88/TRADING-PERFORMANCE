@@ -38,6 +38,7 @@ export interface CloudUserSettings {
   selectedSetup: string;
   assetFilter: string;
   activePortfolioAssets?: string[] | null;
+  customAssets?: string[];
 }
 
 const SETTINGS_DOC_ID = 'preferences';
@@ -123,8 +124,16 @@ function sanitizeSettingsPayload(
     settings.activePortfolioAssets === null || settings.activePortfolioAssets === undefined
       ? null
       : sanitizePortfolioAssets(settings.activePortfolioAssets);
+  const customAssets = sanitizePortfolioAssets(settings.customAssets) ?? [];
 
-  return { language, activeTab, selectedSetup, assetFilter, activePortfolioAssets };
+  return {
+    language,
+    activeTab,
+    selectedSetup,
+    assetFilter,
+    activePortfolioAssets,
+    customAssets,
+  };
 }
 
 export function subscribeUserSettings(
@@ -151,6 +160,7 @@ export function subscribeUserSettings(
           selectedSetup: String(data.selectedSetup ?? 'ALL'),
           assetFilter: String(data.assetFilter ?? 'ALL'),
           activePortfolioAssets: sanitizePortfolioAssets(data.activePortfolioAssets),
+          customAssets: sanitizePortfolioAssets(data.customAssets) ?? [],
         }),
       );
     },
@@ -191,6 +201,9 @@ export async function saveUserSettingsInFirestore(
       if (Array.isArray(clean.activePortfolioAssets)) {
         createPayload.activePortfolioAssets = clean.activePortfolioAssets;
       }
+      if (Array.isArray(clean.customAssets)) {
+        createPayload.customAssets = clean.customAssets;
+      }
       await setDoc(ref, createPayload);
     } else {
       const updatePayload: Record<string, unknown> = {
@@ -198,6 +211,7 @@ export async function saveUserSettingsInFirestore(
         activeTab: clean.activeTab,
         selectedSetup: clean.selectedSetup,
         assetFilter: clean.assetFilter,
+        customAssets: clean.customAssets ?? [],
         updatedAt: serverTimestamp(),
       };
       if (Array.isArray(clean.activePortfolioAssets)) {

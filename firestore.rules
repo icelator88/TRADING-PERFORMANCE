@@ -57,7 +57,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'ownerId', 'language', 'activeTab', 'selectedSetup', 'assetFilter',
-          'activePortfolioAssets', 'createdAt', 'updatedAt'
+          'activePortfolioAssets', 'customAssets', 'createdAt', 'updatedAt'
         ])
         && data.id is string
         && data.id == settingId
@@ -84,6 +84,15 @@ service cloud.firestore {
             data.activePortfolioAssets[0] is string
             && data.activePortfolioAssets[0].size() >= 1
             && data.activePortfolioAssets[0].size() <= 32
+          ))
+        ))
+        && (!('customAssets' in data) || (
+          data.customAssets is list
+          && data.customAssets.size() <= 100
+          && (data.customAssets.size() == 0 || (
+            data.customAssets[0] is string
+            && data.customAssets[0].size() >= 1
+            && data.customAssets[0].size() <= 32
           ))
         ))
         && data.createdAt is timestamp
@@ -327,7 +336,8 @@ service cloud.firestore {
           && incoming().updatedAt == request.time
           && parentUserExists(userId)
           && incoming().diff(existing()).affectedKeys().hasOnly([
-            'language', 'activeTab', 'selectedSetup', 'assetFilter', 'activePortfolioAssets', 'updatedAt'
+            'language', 'activeTab', 'selectedSetup', 'assetFilter',
+            'activePortfolioAssets', 'customAssets', 'updatedAt'
           ]);
         allow delete: if isAuthenticatedAccount()
           && isValidId(userId)

@@ -7,6 +7,7 @@ import {
   FileJson,
   FileSpreadsheet,
   LogOut,
+  Plus,
   RotateCcw,
   Sparkles,
   Upload,
@@ -25,6 +26,7 @@ import {
 import { ImportModal } from './components/ImportModal';
 import { InstitutionalMetricsPanel } from './components/InstitutionalMetricsPanel';
 import { LoginScreen } from './components/LoginScreen';
+import { NewAssetModal } from './components/NewAssetModal';
 import { SetupFilterBar } from './components/SetupFilterBar';
 import { TradeModal } from './components/TradeModal';
 import { TradeTable } from './components/TradeTable';
@@ -71,7 +73,11 @@ import {
   upsertTradeInFirestore,
 } from './utils/firestoreSync';
 import { analizzaTradeConGemini, buildGeminiReviewPrompt } from './utils/geminiReview';
-import { fetchAndParseGoogleSheetTrades } from './utils/googleSheets';
+import {
+  fetchAndParseGoogleSheetTrades,
+  generateGoogleSheetSourceId,
+  parseGoogleSheetUrl,
+} from './utils/googleSheets';
 import {
   buildTradeCoreDuplicateKey,
   deduplicateImportedTrades,
@@ -92,6 +98,7 @@ export function App() {
   const [activePortfolioAssets, setActivePortfolioAssets] = useState<string[] | null>(
     null,
   );
+  const [customAssets, setCustomAssets] = useState<string[]>([]);
 
   const [backtestTrades, setBacktestTrades] = useState<TradeRecord[]>([]);
   const [liveTrades, setLiveTrades] = useState<TradeRecord[]>([]);
@@ -117,6 +124,8 @@ export function App() {
 
   const [googleSheets, setGoogleSheets] = useState<GoogleSheetSource[]>([]);
   const [googleSheetsModalOpen, setGoogleSheetsModalOpen] = useState(false);
+  const [newAssetModalOpen, setNewAssetModalOpen] = useState(false);
+  const [newAssetInitialSymbol, setNewAssetInitialSymbol] = useState('');
   const [cleaningDuplicates, setCleaningDuplicates] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState<TradeRecord | null>(null);
@@ -151,6 +160,7 @@ export function App() {
     selectedSetup,
     assetFilter,
     activePortfolioAssets,
+    customAssets,
   });
 
   useEffect(() => {
@@ -160,8 +170,9 @@ export function App() {
       selectedSetup,
       assetFilter,
       activePortfolioAssets,
+      customAssets,
     };
-  }, [lang, activeTab, selectedSetup, assetFilter, activePortfolioAssets]);
+  }, [lang, activeTab, selectedSetup, assetFilter, activePortfolioAssets, customAssets]);
 
   if (fatalError) {
     throw fatalError;
@@ -228,6 +239,112 @@ export function App() {
     syncSettingsPatch({ activePortfolioAssets: [] });
   };
 
+  const registerCustomAssets = (
+    rawAssets: string[],
+    activateInPortfolio = false,
+  ): string[] => {
+    const normalizedIncoming = Array.from(
+      new Set(
+        rawAssets
+          .map((a) => a.trim().toUpperCase().slice(0, 32))
+          .filter(Boolean),
+      ),
+    );
+    if (normalizedIncoming.length === 0) {
+      return settingsRef.current.customAssets ?? [];
+    }
+
+    const currentCustom = settingsRef.current.customAssets ?? [];
+    const customSet = new Set(currentCustom.map((a) => a.trim().toUpperCase()));
+    let customChanged = false;
+    normalizedIncoming.forEach((asset) => {
+      if (!customSet.has(asset)) {
+        customSet.add(asset);
+        customChanged = true;
+      }
+    });
+
+    const nextCustom = Array.from(customSet).sort().slice(0, 100);
+    const patch: Partial<CloudUserSettings> = {};
+    if (customChanged) {
+      patch.customAssets = nextCustom;
+      setCustomAssets(nextCustom);
+    }
+
+    if (
+      activateInPortfolio &&
+      Array.isArray(settingsRef.current.activePortfolioAssets)
+    ) {
+      const portfolioSet = new Set(
+        settingsRef.current.activePortfolioAssets.map((a) =>
+          a.trim().toUpperCase(),
+        ),
+      );
+      let portfolioChanged = false;
+      normalizedIncoming.forEach((asset) => {
+        if (!portfolioSet.has(asset)) {
+          portfolioSet.add(asset);
+          portfolioChanged = true;
+        }
+      });
+      if (portfolioChanged) {
+        const nextPortfolio = Array.from(portfolioSet).sort().slice(0, 100);
+        patch.activePortfolioAssets = nextPortfolio;
+        setActivePortfolioAssets(nextPortfolio);
+      }
+    }
+
+    if (Object.keys(patch).length > 0) {
+      syncSettingsPatch(patch);
+    }
+    return nextCustom;
+  };
+
+  const handleSaveNewAsset = async (payload: {
+    asset: string;
+    sheetUrl?: string;
+    category: TradeCategory;
+  }) => {
+    if (!firebaseUser) {
+      throw new Error('Devi essere autenticato per salvare un asset su Firebase.');
+    }
+    const cleanAsset = payload.asset.trim().toUpperCase().slice(0, 32);
+    if (!cleanAsset) {
+      throw new Error('Simbolo Asset non valido.');
+    }
+
+    if (payload.sheetUrl) {
+      const parsedLink = parseGoogleSheetUrl(payload.sheetUrl);
+      const duplicateSource = googleSheets.find(
+        (s) =>
+          s.spreadsheetId === parsedLink.spreadsheetId &&
+          s.asset.trim().toUpperCase() === cleanAsset &&
+          s.category === payload.category,
+      );
+      if (duplicateSource) {
+        throw new Error(
+          `Questo foglio Google è già collegato a ${cleanAsset}.`,
+        );
+      }
+      const newSource: GoogleSheetSource = {
+        id: generateGoogleSheetSourceId(),
+        asset: cleanAsset,
+        sheetUrl: parsedLink.canonicalUrl,
+        spreadsheetId: parsedLink.spreadsheetId,
+        category: payload.category,
+        createdAt: Date.now(),
+      };
+      await saveGoogleSheetSourceInFirestore(firebaseUser.uid, newSource);
+    }
+
+    registerCustomAssets([cleanAsset], true);
+    showToast(
+      payload.sheetUrl
+        ? `Asset ${cleanAsset} e collegamento Google Sheets salvati su Firebase.`
+        : `Asset ${cleanAsset} registrato e salvato su Firebase.`,
+    );
+  };
+
   const showToast = (msg: string, duration = 4500) => {
     if (toastTimerRef.current !== null) {
       window.clearTimeout(toastTimerRef.current);
@@ -276,6 +393,7 @@ export function App() {
         setMissedTrades([]);
         setGoogleSheets([]);
         setActivePortfolioAssets(null);
+        setCustomAssets([]);
         setFirebaseUser(null);
         setCloudSyncStatus('idle');
         setAuthReady(true);
@@ -324,6 +442,7 @@ export function App() {
           setSelectedSetup(cloudSettings.selectedSetup);
           setAssetFilter(cloudSettings.assetFilter);
           setActivePortfolioAssets(cloudSettings.activePortfolioAssets ?? null);
+          setCustomAssets(cloudSettings.customAssets ?? []);
         },
         (err) => {
           if (active) setFatalError(err);
@@ -408,9 +527,15 @@ export function App() {
         ? missedTrades
         : [...backtestTrades, ...liveTrades];
     return Array.from(
-      new Set(sourcePool.map((tr) => tr.asset.trim().toUpperCase()).filter(Boolean)),
+      new Set([
+        ...sourcePool.map((tr) => tr.asset.trim().toUpperCase()).filter(Boolean),
+        ...customAssets.map((a) => a.trim().toUpperCase()).filter(Boolean),
+        ...googleSheets
+          .map((s) => s.asset.trim().toUpperCase())
+          .filter(Boolean),
+      ]),
     ).sort();
-  }, [activeTab, backtestTrades, liveTrades, missedTrades]);
+  }, [activeTab, backtestTrades, liveTrades, missedTrades, customAssets, googleSheets]);
 
   const filterBySetupAndAsset = (list: TradeRecord[]) => {
     return list.filter((tr) => {
@@ -470,18 +595,19 @@ export function App() {
     [filteredMissed],
   );
 
-  // Active Portfolio Assets available in Backtest for Dashboard multi-select toggle bar
+  // Active Portfolio Assets available in Backtest (+ registered custom assets) for Dashboard multi-select toggle bar
   const backtestPortfolioAssets = useMemo(
     () =>
       Array.from(
-        new Set(
-          backtestTrades
+        new Set([
+          ...backtestTrades
             .filter((tr) => tr.category === 'backtest')
             .map((tr) => tr.asset.trim().toUpperCase())
             .filter(Boolean),
-        ),
+          ...customAssets.map((a) => a.trim().toUpperCase()).filter(Boolean),
+        ]),
       ).sort(),
-    [backtestTrades],
+    [backtestTrades, customAssets],
   );
 
   const activePortfolioAssetSet = useMemo(
@@ -866,12 +992,21 @@ export function App() {
         ? ` | Totale: ${formattedTotalR} (${breakdown})`
         : '';
 
+    // Auto-detect and register any new asset names from imported CSV/Excel trades
+    const detectedImportAssets = Array.from(
+      new Set(imported.map((tr) => tr.asset.trim().toUpperCase()).filter(Boolean)),
+    );
+    if (detectedImportAssets.length > 0) {
+      registerCustomAssets(detectedImportAssets, false);
+    }
+
     showToast(`${baseSummary}${details}`, 9000);
   };
 
   const handleAddGoogleSheetSource = async (source: GoogleSheetSource) => {
     if (!firebaseUser) return;
     await saveGoogleSheetSourceInFirestore(firebaseUser.uid, source);
+    registerCustomAssets([source.asset], false);
     showToast(`Collegamento ${source.asset} salvato su Firebase.`);
   };
 
@@ -1575,6 +1710,18 @@ export function App() {
                 </option>
               ))}
             </select>
+
+            <button
+              type="button"
+              onClick={() => {
+                setNewAssetInitialSymbol('');
+                setNewAssetModalOpen(true);
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-xs font-semibold text-sky-300 transition-colors hover:bg-sky-500/20 whitespace-nowrap shrink-0"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>Nuovo Asset</span>
+            </button>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
@@ -2784,6 +2931,7 @@ export function App() {
         initialCategory={tradeModalCategory}
         editingTrade={editingTrade}
         customSetups={customSetups}
+        knownAssets={availableAssets}
         t={t}
         onClose={() => {
           setTradeModalOpen(false);
@@ -2819,11 +2967,34 @@ export function App() {
         }
         sources={googleSheets}
         knownAssets={availableAssets}
+        customAssets={customAssets}
         onClose={() => setGoogleSheetsModalOpen(false)}
         onAddSource={handleAddGoogleSheetSource}
         onDeleteSource={handleDeleteGoogleSheetSource}
         onSyncSingle={handleSyncSingleGoogleSheet}
         onSyncAll={handleSyncAllGoogleSheets}
+        onOpenNewAssetModal={(prefillAsset) => {
+          setNewAssetInitialSymbol(prefillAsset ?? '');
+          setNewAssetModalOpen(true);
+        }}
+      />
+
+      <NewAssetModal
+        isOpen={newAssetModalOpen}
+        lang={lang}
+        defaultCategory={
+          activeTab === 'live'
+            ? 'live'
+            : activeTab === 'missed'
+              ? 'missed'
+              : 'backtest'
+        }
+        initialAsset={newAssetInitialSymbol}
+        onClose={() => {
+          setNewAssetModalOpen(false);
+          setNewAssetInitialSymbol('');
+        }}
+        onSave={handleSaveNewAsset}
       />
 
       <ConfirmModal

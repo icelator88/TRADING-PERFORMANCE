@@ -77,6 +77,10 @@
           "type": "array",
           "description": "Selected Backtest assets active in Dashboard comparisons."
         },
+        "customAssets": {
+          "type": "array",
+          "description": "User-registered custom trading asset symbols persisted across sessions."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
