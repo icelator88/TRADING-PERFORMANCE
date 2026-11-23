@@ -1,4 +1,9 @@
-import type { GoogleSheetSource, TradeCategory, TradeRecord } from '../types/trading';
+import type {
+  GoogleSheetSource,
+  OutcomeType,
+  TradeCategory,
+  TradeRecord,
+} from '../types/trading';
 import {
   autoDetectColumnMapping,
   buildTradesFromSheet,
@@ -102,6 +107,57 @@ function hasXlsxMagicBytes(buffer: ArrayBuffer): boolean {
   return bytes[0] === 0x50 && bytes[1] === 0x4b;
 }
 
+function sanitizeIdSegment(raw: string, fallback: string): string {
+  const cleaned = String(raw ?? '')
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return cleaned || fallback;
+}
+
+function shortDeterministicHash(input: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36).padStart(6, '0').slice(0, 6);
+}
+
+/**
+ * Generates a deterministic, Firestore-safe unique ID per Google Sheets row:
+ * Asset_SheetName_RowIndex_Date_Time_Outcome (strictly ^[a-zA-Z0-9_-]{1,128}$).
+ */
+export function buildDeterministicGoogleSheetTradeId(params: {
+  asset: string;
+  sheetName: string;
+  rowIndex: number;
+  date: string;
+  entryTime: string;
+  outcome: OutcomeType;
+}): string {
+  const safeAsset = sanitizeIdSegment(params.asset.toUpperCase(), 'ASSET');
+  const safeSheet = sanitizeIdSegment(params.sheetName.toUpperCase(), 'SHEET');
+  const safeRow = Math.max(1, Math.floor(params.rowIndex || 1));
+  const safeDate = sanitizeIdSegment(params.date, 'NODATE');
+  const safeTime = sanitizeIdSegment(params.entryTime || '00-00', '00-00');
+  const safeOutcome = sanitizeIdSegment(params.outcome.toUpperCase(), 'OUTCOME');
+
+  const fullId = `${safeAsset}_${safeSheet}_${safeRow}_${safeDate}_${safeTime}_${safeOutcome}`;
+  if (fullId.length <= 128) {
+    return fullId;
+  }
+
+  const hashSuffix = shortDeterministicHash(fullId);
+  const fixedPart = `${safeAsset}_${safeRow}_${safeDate}_${safeTime}_${safeOutcome}_${hashSuffix}`;
+  const maxSheetLen = Math.max(4, 128 - fixedPart.length - 1);
+  const trimmedSheet = safeSheet.slice(0, maxSheetLen).replace(/-+$/g, '') || 'S';
+  return `${safeAsset}_${trimmedSheet}_${safeRow}_${safeDate}_${safeTime}_${safeOutcome}_${hashSuffix}`.slice(
+    0,
+    128,
+  );
+}
+
 /**
  * Parses an already-downloaded Google Sheets XLSX ArrayBuffer, strictly reading ONLY the 5 exact strategy tabs
  * ('S1', 'SSA', 'MUTAZIONE', 'SBIL. DOMINANCE REALE', 'SBIL. DOMINANCE INTRAS. 1candela') and ignoring any others.
@@ -140,6 +196,17 @@ export function parseGoogleSheetWorkbookBuffer(
       category,
       exactStrategy,
       cleanAsset,
+      {
+        idBuilder: (ctx) =>
+          buildDeterministicGoogleSheetTradeId({
+            asset: cleanAsset,
+            sheetName: ctx.sheetName,
+            rowIndex: ctx.rowIndex,
+            date: ctx.date,
+            entryTime: ctx.entryTime,
+            outcome: ctx.outcome,
+          }),
+      },
     ).map((tr) => ({
       ...tr,
       asset: cleanAsset,

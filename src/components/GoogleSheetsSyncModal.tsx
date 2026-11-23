@@ -594,17 +594,24 @@ export function GoogleSheetsSyncModal({
 
           {/* Summary strip after runs */}
           {recentOutcomes.length > 0 ? (
-            <div className="rounded-lg border border-[#1E2634] bg-[#0B0E14] px-4 py-3 text-[11px] text-slate-300">
-              <span className="font-semibold text-slate-100">
-                Riepilogo sessione corrente:
-              </span>{' '}
-              <span className="font-mono text-emerald-400">
-                +{aggregateAdded} nuovi trade aggiunti
-              </span>{' '}
-              ·{' '}
-              <span className="font-mono text-slate-400">
-                {aggregateSkipped} duplicati ignorati
-              </span>
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#1E2634] bg-[#0B0E14] px-4 py-3 text-[11px] text-slate-300">
+              <div>
+                <span className="font-semibold text-slate-100">
+                  {lang === 'en' ? 'Current sync summary:' : 'Riepilogo sincronizzazione:'}
+                </span>{' '}
+                <span className="font-mono font-semibold text-emerald-400">
+                  +{aggregateAdded} {lang === 'en' ? 'new' : 'new'}
+                </span>
+                <span className="text-slate-500">, </span>
+                <span className="font-mono text-slate-400">
+                  {aggregateSkipped} skipped
+                </span>
+              </div>
+              {aggregateAdded > 0 ? (
+                <span className="rounded border border-sky-500/35 bg-sky-500/10 px-2 py-0.5 font-mono text-[10px] text-sky-300">
+                  Filtro Dashboard &quot;Show Last Synced ({aggregateAdded})&quot; attivo
+                </span>
+              ) : null}
             </div>
           ) : null}
         </div>

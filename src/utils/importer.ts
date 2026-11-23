@@ -4,6 +4,7 @@ import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import {
   type MappingField,
   MISSED_REASONS,
+  type OutcomeType,
   type ParsedSheetData,
   type TradeCategory,
   type TradeRecord,
@@ -816,6 +817,7 @@ function rowsMatrixToParsedSheet(
         rProgVal !== null ? String(rProgVal) : String(row[activeCols.rProg] ?? '').trim(),
       LINK: resolvedLink,
       __blockSetup: assignedStrategy,
+      __rowIndex: String(r + 1),
     };
 
     blockCounts[effectiveBlockIndex] = (blockCounts[effectiveBlockIndex] ?? 0) + 1;
@@ -1011,12 +1013,24 @@ export function autoDetectColumnMapping(headers: string[]): Record<string, Mappi
   return mapping;
 }
 
+export interface BuildTradeIdContext {
+  asset: string;
+  sheetName: string;
+  rowIndex: number;
+  date: string;
+  entryTime: string;
+  outcome: OutcomeType;
+  idx: number;
+  category: TradeCategory;
+}
+
 export function buildTradesFromSheet(
   sheet: ParsedSheetData,
   mapping: Record<string, MappingField>,
   targetCategory: TradeCategory,
   setupOverride: string,
   defaultAsset = 'CHF/JPY',
+  options?: { idBuilder?: (ctx: BuildTradeIdContext) => string },
 ): TradeRecord[] {
   const trades: TradeRecord[] = [];
   const now = Date.now();
@@ -1080,8 +1094,22 @@ export function buildTradesFromSheet(
           (outcome === 'UNFILLED' ? 'Ordine Non Fillato' : MISSED_REASONS[0])
         : undefined;
 
+    const rowIndex = Number.parseInt(rawRow.__rowIndex ?? '', 10) || idx + 1;
+    const tradeId = options?.idBuilder
+      ? options.idBuilder({
+          asset,
+          sheetName: sheet.sheetName,
+          rowIndex,
+          date: parsedDate,
+          entryTime: normEntryTime || '',
+          outcome,
+          idx,
+          category: finalCategory,
+        })
+      : generateTradeId(finalCategory.slice(0, 2));
+
     const base: TradeRecord = {
-      id: generateTradeId(finalCategory.slice(0, 2)),
+      id: tradeId,
       category: finalCategory,
       date: parsedDate,
       day: String(fieldValues.day ?? rawRow.GIORNO ?? '').trim() || undefined,

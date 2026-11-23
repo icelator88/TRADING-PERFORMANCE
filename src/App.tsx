@@ -60,6 +60,7 @@ import {
   deleteMissedTradeInFirestore,
   deleteTradeInFirestore,
   ensureUserProfile,
+  fetchExistingFirestoreTradeIds,
   fetchUserMissedTradesFromFirestore,
   fetchUserTradesFromFirestore,
   migrateLegacyMissedTradesFromTradesCollection,
@@ -131,6 +132,13 @@ export function App() {
   const [newAssetModalOpen, setNewAssetModalOpen] = useState(false);
   const [newAssetInitialSymbol, setNewAssetInitialSymbol] = useState('');
   const [cleaningDuplicates, setCleaningDuplicates] = useState(false);
+  const [lastSyncedTrades, setLastSyncedTrades] = useState<TradeRecord[]>([]);
+  const [showLastSyncedOnly, setShowLastSyncedOnly] = useState(false);
+  const [lastSyncStats, setLastSyncStats] = useState<{
+    added: number;
+    skipped: number;
+    label: string;
+  } | null>(null);
 
   const [deleteTarget, setDeleteTarget] = useState<TradeRecord | null>(null);
   const [deletingSingle, setDeletingSingle] = useState(false);
@@ -682,10 +690,13 @@ export function App() {
     [dashboardPortfolioLive],
   );
 
-  const dashboardAkinatorScan = useMemo(
-    () => calculateAkinatorBacktestScan(dashboardPortfolioBacktest),
-    [dashboardPortfolioBacktest],
+  const lastSyncedIdSet = useMemo(
+    () => new Set(lastSyncedTrades.map((tr) => tr.id)),
+    [lastSyncedTrades],
   );
+
+  const isLastSyncedFilterActive =
+    showLastSyncedOnly && lastSyncedTrades.length > 0;
 
   // Earliest live trade date per asset in Journal Reale (YYYY-MM-DD) for aligned Dashboard comparison
   const liveStartDateByAsset = useMemo(() => {
@@ -727,14 +738,47 @@ export function App() {
     });
   }, [dashboardPortfolioBacktest, isLiveAligned, liveStartDateByAsset]);
 
+  const visibleDashboardBacktestTrades = useMemo(() => {
+    if (isLastSyncedFilterActive) {
+      return backtestTrades.filter(
+        (tr) => tr.category === 'backtest' && lastSyncedIdSet.has(tr.id),
+      );
+    }
+    return dashboardBacktestTrades;
+  }, [
+    isLastSyncedFilterActive,
+    backtestTrades,
+    lastSyncedIdSet,
+    dashboardBacktestTrades,
+  ]);
+
+  const visibleDashboardLiveTrades = useMemo(() => {
+    if (isLastSyncedFilterActive) {
+      return liveTrades.filter(
+        (tr) => tr.category === 'live' && lastSyncedIdSet.has(tr.id),
+      );
+    }
+    return dashboardPortfolioLive;
+  }, [
+    isLastSyncedFilterActive,
+    liveTrades,
+    lastSyncedIdSet,
+    dashboardPortfolioLive,
+  ]);
+
+  const dashboardAkinatorScan = useMemo(
+    () => calculateAkinatorBacktestScan(visibleDashboardBacktestTrades),
+    [visibleDashboardBacktestTrades],
+  );
+
   const dashboardBacktestStats = useMemo(
-    () => calculatePerformanceStats(dashboardBacktestTrades),
-    [dashboardBacktestTrades],
+    () => calculatePerformanceStats(visibleDashboardBacktestTrades),
+    [visibleDashboardBacktestTrades],
   );
 
   const dashboardLiveStats = useMemo(
-    () => calculatePerformanceStats(dashboardPortfolioLive),
-    [dashboardPortfolioLive],
+    () => calculatePerformanceStats(visibleDashboardLiveTrades),
+    [visibleDashboardLiveTrades],
   );
 
   // Portfolio Rotation Alert: monitor unselected Backtest assets over the last 30 days
@@ -1054,9 +1098,8 @@ export function App() {
 
   const runGoogleSheetSyncForSource = async (
     source: GoogleSheetSource,
-    btPool: TradeRecord[],
-    livePool: TradeRecord[],
-    missedPool: TradeRecord[],
+    existingMainIds: Set<string>,
+    existingMissedIds: Set<string>,
   ): Promise<{
     outcome: AssetSyncOutcome;
     addedBt: TradeRecord[];
@@ -1064,18 +1107,31 @@ export function App() {
     addedMissed: TradeRecord[];
   }> => {
     const fetched = await fetchAndParseGoogleSheetTrades(source);
-    const targetPool =
-      source.category === 'backtest'
-        ? btPool
-        : source.category === 'missed'
-          ? missedPool
-          : livePool;
+    const targetCollection =
+      source.category === 'missed' ? 'missedTrades' : 'trades';
+    const targetExistingIds =
+      source.category === 'missed' ? existingMissedIds : existingMainIds;
 
-    const { addedTrades, skippedDuplicates } = deduplicateImportedTrades(
-      targetPool,
-      fetched.trades,
-      { keyFn: buildTradeCoreDuplicateKey },
-    );
+    // Check Firestore directly before saving to guarantee existing deterministic IDs are skipped
+    if (firebaseUser) {
+      const firestoreIds = await fetchExistingFirestoreTradeIds(
+        firebaseUser.uid,
+        targetCollection,
+      );
+      firestoreIds.forEach((id) => targetExistingIds.add(id));
+    }
+
+    const addedTrades: TradeRecord[] = [];
+    let skippedDuplicates = 0;
+
+    fetched.trades.forEach((tr) => {
+      if (!tr.id || targetExistingIds.has(tr.id)) {
+        skippedDuplicates += 1;
+        return;
+      }
+      targetExistingIds.add(tr.id);
+      addedTrades.push(tr);
+    });
 
     const addedBt: TradeRecord[] = [];
     const addedLive: TradeRecord[] = [];
@@ -1089,7 +1145,6 @@ export function App() {
           isMissed: false,
           missedReason: undefined,
         };
-        targetPool.push(normalizedBt);
         addedBt.push(normalizedBt);
       } else if (source.category === 'missed') {
         const normalizedMissed: TradeRecord = {
@@ -1097,7 +1152,6 @@ export function App() {
           category: 'missed',
           isMissed: true,
         };
-        targetPool.push(normalizedMissed);
         addedMissed.push(normalizedMissed);
       } else {
         const normalizedLive: TradeRecord = {
@@ -1106,7 +1160,6 @@ export function App() {
           isMissed: false,
           missedReason: undefined,
         };
-        targetPool.push(normalizedLive);
         addedLive.push(normalizedLive);
       }
     });
@@ -1123,12 +1176,12 @@ export function App() {
 
     const summaryMsg =
       lang === 'en'
-        ? `Sync complete (${source.asset}): ${addedTrades.length} new trades added, ${skippedDuplicates} duplicates ignored`
+        ? `Sync (${source.asset}): +${addedTrades.length} new, ${skippedDuplicates} skipped`
         : lang === 'es'
-          ? `Sincronización completada (${source.asset}): ${addedTrades.length} nuevos trades añadidos, ${skippedDuplicates} duplicados omitidos`
-          : `Sincronizzazione completata (${source.asset}): ${addedTrades.length} nuovi trade aggiunti, ${skippedDuplicates} duplicati ignorati`;
+          ? `Sync (${source.asset}): +${addedTrades.length} nuevos, ${skippedDuplicates} omitidos`
+          : `Sync (${source.asset}): +${addedTrades.length} new, ${skippedDuplicates} skipped`;
 
-    const shortStatus = `+${addedTrades.length} nuovi · ${skippedDuplicates} duplicati`;
+    const shortStatus = `+${addedTrades.length} new, ${skippedDuplicates} skipped`;
     if (firebaseUser) {
       await updateGoogleSheetSyncStatusInFirestore(
         firebaseUser.uid,
@@ -1162,52 +1215,20 @@ export function App() {
   const handleSyncSingleGoogleSheet = async (
     source: GoogleSheetSource,
   ): Promise<AssetSyncOutcome> => {
-    const btPool = [...backtestTrades];
-    const livePool = [...liveTrades];
-    const missedPool = [...missedTrades];
-
-    if (firebaseUser) {
-      try {
-        if (source.category === 'missed') {
-          const dbMissed = await fetchUserMissedTradesFromFirestore(firebaseUser.uid);
-          const byIdMissed = new Map<string, TradeRecord>();
-          dbMissed.forEach((tr) => byIdMissed.set(tr.id, tr));
-          missedPool.forEach((tr) => byIdMissed.set(tr.id, tr));
-          missedPool.splice(0, missedPool.length, ...byIdMissed.values());
-        } else {
-          const dbTrades = await fetchUserTradesFromFirestore(firebaseUser.uid);
-          const byIdBt = new Map<string, TradeRecord>();
-          const byIdLv = new Map<string, TradeRecord>();
-          dbTrades.forEach((tr) => {
-            if (tr.category === 'backtest') {
-              byIdBt.set(tr.id, tr);
-            } else if (tr.category === 'live') {
-              byIdLv.set(tr.id, tr);
-            }
-          });
-          btPool.forEach((tr) => byIdBt.set(tr.id, tr));
-          livePool.forEach((tr) => byIdLv.set(tr.id, tr));
-          btPool.splice(0, btPool.length, ...byIdBt.values());
-          livePool.splice(0, livePool.length, ...byIdLv.values());
-        }
-      } catch (err) {
-        const message =
-          err instanceof Error ? err.message : 'Errore di lettura da Firebase.';
-        return {
-          sourceId: source.id,
-          asset: source.asset,
-          status: 'error',
-          added: 0,
-          skipped: 0,
-          tabsScanned: [],
-          message,
-        };
-      }
-    }
+    const existingMainIds = new Set<string>(
+      [...backtestTrades, ...liveTrades].map((tr) => tr.id),
+    );
+    const existingMissedIds = new Set<string>(
+      missedTrades.map((tr) => tr.id),
+    );
 
     try {
       const { outcome, addedBt, addedLive, addedMissed } =
-        await runGoogleSheetSyncForSource(source, btPool, livePool, missedPool);
+        await runGoogleSheetSyncForSource(
+          source,
+          existingMainIds,
+          existingMissedIds,
+        );
 
       const appendUniqueById = (prev: TradeRecord[], incoming: TradeRecord[]) => {
         const map = new Map<string, TradeRecord>();
@@ -1225,6 +1246,15 @@ export function App() {
       if (addedMissed.length > 0) {
         setMissedTrades((prev) => appendUniqueById(prev, addedMissed));
       }
+
+      const newlyAdded = [...addedBt, ...addedLive, ...addedMissed];
+      setLastSyncedTrades(newlyAdded);
+      setLastSyncStats({
+        added: outcome.added,
+        skipped: outcome.skipped,
+        label: source.asset,
+      });
+      setShowLastSyncedOnly(newlyAdded.length > 0);
 
       showToast(outcome.message, 8000);
       return outcome;
@@ -1247,33 +1277,21 @@ export function App() {
   const handleSyncAllGoogleSheets = async (
     onProgress?: (currentIndex: number, total: number, asset: string) => void,
   ): Promise<AssetSyncOutcome[]> => {
-    const btPool = [...backtestTrades];
-    const livePool = [...liveTrades];
-    const missedPool = [...missedTrades];
+    const existingMainIds = new Set<string>(
+      [...backtestTrades, ...liveTrades].map((tr) => tr.id),
+    );
+    const existingMissedIds = new Set<string>(
+      missedTrades.map((tr) => tr.id),
+    );
 
     if (firebaseUser) {
       try {
-        const [dbTrades, dbMissed] = await Promise.all([
-          fetchUserTradesFromFirestore(firebaseUser.uid),
-          fetchUserMissedTradesFromFirestore(firebaseUser.uid),
+        const [dbMainIds, dbMissedIds] = await Promise.all([
+          fetchExistingFirestoreTradeIds(firebaseUser.uid, 'trades'),
+          fetchExistingFirestoreTradeIds(firebaseUser.uid, 'missedTrades'),
         ]);
-        const byIdBt = new Map<string, TradeRecord>();
-        const byIdLv = new Map<string, TradeRecord>();
-        const byIdMissed = new Map<string, TradeRecord>();
-        dbTrades.forEach((tr) => {
-          if (tr.category === 'backtest') {
-            byIdBt.set(tr.id, tr);
-          } else if (tr.category === 'live') {
-            byIdLv.set(tr.id, tr);
-          }
-        });
-        dbMissed.forEach((tr) => byIdMissed.set(tr.id, tr));
-        btPool.forEach((tr) => byIdBt.set(tr.id, tr));
-        livePool.forEach((tr) => byIdLv.set(tr.id, tr));
-        missedPool.forEach((tr) => byIdMissed.set(tr.id, tr));
-        btPool.splice(0, btPool.length, ...byIdBt.values());
-        livePool.splice(0, livePool.length, ...byIdLv.values());
-        missedPool.splice(0, missedPool.length, ...byIdMissed.values());
+        dbMainIds.forEach((id) => existingMainIds.add(id));
+        dbMissedIds.forEach((id) => existingMissedIds.add(id));
       } catch (err) {
         setFatalError(err instanceof Error ? err : new Error(String(err)));
         return [];
@@ -1289,7 +1307,11 @@ export function App() {
       const src = googleSheets[i];
       onProgress?.(i + 1, googleSheets.length, src.asset);
       try {
-        const res = await runGoogleSheetSyncForSource(src, btPool, livePool, missedPool);
+        const res = await runGoogleSheetSyncForSource(
+          src,
+          existingMainIds,
+          existingMissedIds,
+        );
         outcomes.push(res.outcome);
         allAddedBt.push(...res.addedBt);
         allAddedLive.push(...res.addedLive);
@@ -1331,12 +1353,21 @@ export function App() {
     const totalSkipped = outcomes.reduce((s, o) => s + o.skipped, 0);
     const errorCount = outcomes.filter((o) => o.status === 'error').length;
 
+    const newlyAdded = [...allAddedBt, ...allAddedLive, ...allAddedMissed];
+    setLastSyncedTrades(newlyAdded);
+    setLastSyncStats({
+      added: totalAdded,
+      skipped: totalSkipped,
+      label: lang === 'en' ? 'All Assets' : 'Tutti gli Asset',
+    });
+    setShowLastSyncedOnly(newlyAdded.length > 0);
+
     const baseAllMsg =
       lang === 'en'
-        ? `Sync complete: ${totalAdded} new trades added, ${totalSkipped} duplicates ignored`
+        ? `Sync complete: +${totalAdded} new, ${totalSkipped} skipped`
         : lang === 'es'
-          ? `Sincronización completada: ${totalAdded} nuevos trades añadidos, ${totalSkipped} duplicados omitidos`
-          : `Sincronizzazione completata: ${totalAdded} nuovi trade aggiunti, ${totalSkipped} duplicati ignorati`;
+          ? `Sincronización completada: +${totalAdded} nuevos, ${totalSkipped} omitidos`
+          : `Sincronizzazione completata: +${totalAdded} new, ${totalSkipped} skipped`;
 
     showToast(
       errorCount > 0 ? `${baseAllMsg} (${errorCount} asset con errore)` : baseAllMsg,
@@ -2144,6 +2175,145 @@ export function App() {
         {/* TAB 1: DASHBOARD & COMPARISON */}
         {activeTab === 'dashboard' ? (
           <div className="space-y-8">
+            {/* Google Sheets Last Sync Summary & "Show Last Synced (X)" Filter Toggle */}
+            {lastSyncStats || lastSyncedTrades.length > 0 ? (
+              <section
+                aria-label="Last Synced Filter"
+                className={`rounded-lg border px-4 py-3.5 ${
+                  isLastSyncedFilterActive
+                    ? 'border-sky-500/50 bg-sky-500/10'
+                    : 'border-[#1E2634] bg-[#121721]'
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-2.5 text-xs">
+                    <FileSpreadsheet className="h-4 w-4 shrink-0 text-emerald-400" />
+                    {lastSyncStats ? (
+                      <span className="font-medium text-slate-200">
+                        Sync {lastSyncStats.label}:{' '}
+                        <span className="font-mono font-semibold text-emerald-400">
+                          +{lastSyncStats.added} new
+                        </span>
+                        <span className="text-slate-500">, </span>
+                        <span className="font-mono text-slate-400">
+                          {lastSyncStats.skipped} skipped
+                        </span>
+                      </span>
+                    ) : null}
+
+                    {isLastSyncedFilterActive ? (
+                      <span className="rounded border border-sky-400/40 bg-sky-500/15 px-2 py-0.5 font-mono text-[11px] font-semibold text-sky-200">
+                        {lang === 'en'
+                          ? 'Dashboard filtered to newly synced trades'
+                          : 'Dashboard filtrata sui nuovi trade sincronizzati'}
+                      </span>
+                    ) : null}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {lastSyncedTrades.length > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowLastSyncedOnly((prev) => !prev)}
+                        aria-pressed={showLastSyncedOnly}
+                        className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 font-mono text-xs font-semibold transition-colors whitespace-nowrap ${
+                          showLastSyncedOnly
+                            ? 'border-sky-400 bg-sky-600 text-white shadow-xs'
+                            : 'border-sky-500/40 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20'
+                        }`}
+                      >
+                        <span>Show Last Synced ({lastSyncedTrades.length})</span>
+                      </button>
+                    ) : null}
+
+                    {showLastSyncedOnly ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowLastSyncedOnly(false)}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-[#263042] bg-[#0B0E14] px-3 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:border-slate-500 hover:text-white whitespace-nowrap"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        <span>
+                          {lang === 'en' ? 'Show All Trades' : 'Mostra Tutti'}
+                        </span>
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+
+                {isLastSyncedFilterActive ? (
+                  <div className="mt-3 overflow-x-auto rounded-md border border-[#1E2634] bg-[#0B0E14]">
+                    <table className="w-full border-collapse text-left text-xs">
+                      <thead>
+                        <tr className="border-b border-[#1E2634] text-[11px] text-slate-400">
+                          <th className="px-3 py-2">Data</th>
+                          <th className="px-3 py-2">Sezione</th>
+                          <th className="px-3 py-2">Asset</th>
+                          <th className="px-3 py-2">Setup</th>
+                          <th className="px-3 py-2">Esito</th>
+                          <th className="px-3 py-2 text-right"># R</th>
+                          <th className="px-3 py-2">Note</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#1E2634] font-mono text-[11px] tabular-nums">
+                        {lastSyncedTrades.map((tr) => (
+                          <tr key={tr.id} className="hover:bg-[#121721]">
+                            <td className="px-3 py-2 text-slate-300">
+                              {formatDisplayDate(tr.date)}
+                              {tr.entryTime ? ` · ${tr.entryTime}` : ''}
+                            </td>
+                            <td className="px-3 py-2 font-sans">
+                              <span
+                                className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${
+                                  tr.category === 'live'
+                                    ? 'border-sky-500/40 bg-sky-500/10 text-sky-300'
+                                    : tr.category === 'missed'
+                                      ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+                                      : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                                }`}
+                              >
+                                {tr.category === 'live'
+                                  ? 'Journal Reale'
+                                  : tr.category === 'missed'
+                                    ? 'Trade Non Presi'
+                                    : 'Backtest'}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 font-semibold text-slate-100">
+                              {tr.asset}
+                            </td>
+                            <td className="px-3 py-2 text-slate-300">{tr.setup}</td>
+                            <td className="px-3 py-2">
+                              <span
+                                className={
+                                  tr.outcome === 'TP'
+                                    ? 'text-emerald-400'
+                                    : tr.outcome === 'STOP LOSS'
+                                      ? 'text-rose-400'
+                                      : 'text-slate-300'
+                                }
+                              >
+                                {tr.outcome}
+                              </span>
+                            </td>
+                            <td
+                              className={`px-3 py-2 text-right font-semibold ${
+                                tr.netR >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                              }`}
+                            >
+                              {formatR(tr.netR)}
+                            </td>
+                            <td className="max-w-xs truncate px-3 py-2 font-sans text-slate-400">
+                              {tr.notes || '—'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
 
             {/* Portfolio Rotation Alert Banner (Last 30 Days vs Latest DB Trade Date) */}
             {portfolioRotationAlert ? (
@@ -2340,17 +2510,21 @@ export function App() {
               liveStartDate={liveStartDate}
               liveStats={dashboardLiveStats}
               backtestStats={dashboardBacktestStats}
-              liveTrades={dashboardPortfolioLive}
-              backtestTrades={dashboardBacktestTrades}
+              liveTrades={visibleDashboardLiveTrades}
+              backtestTrades={visibleDashboardBacktestTrades}
               missedTrades={
-                isLiveAligned && liveStartDate
-                  ? dashboardPortfolioMissed.filter((tr) => {
-                      const assetStart =
-                        liveStartDateByAsset.get(tr.asset.trim().toUpperCase()) ??
-                        liveStartDate;
-                      return tr.date >= assetStart;
-                    })
-                  : dashboardPortfolioMissed
+                isLastSyncedFilterActive
+                  ? missedTrades.filter(
+                      (tr) => tr.category === 'missed' && lastSyncedIdSet.has(tr.id),
+                    )
+                  : isLiveAligned && liveStartDate
+                    ? dashboardPortfolioMissed.filter((tr) => {
+                        const assetStart =
+                          liveStartDateByAsset.get(tr.asset.trim().toUpperCase()) ??
+                          liveStartDate;
+                        return tr.date >= assetStart;
+                      })
+                    : dashboardPortfolioMissed
               }
             />
 
@@ -2562,8 +2736,8 @@ export function App() {
             {/* Read-Only What-If Progression & Martingale Simulator */}
             <MartingaleSimulatorCard
               lang={lang}
-              backtestTrades={dashboardBacktestTrades}
-              liveTrades={dashboardPortfolioLive}
+              backtestTrades={visibleDashboardBacktestTrades}
+              liveTrades={visibleDashboardLiveTrades}
             />
           </div>
         ) : null}

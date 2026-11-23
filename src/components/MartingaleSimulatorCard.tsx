@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import {
   AlertTriangle,
+  Ban,
   Calculator,
   CheckCircle2,
   RotateCcw,
@@ -27,11 +28,16 @@ interface SimulationPoint {
   simEquity: number;
   simRiskPct: number;
   stepUsed: number;
+  blocked?: boolean;
 }
 
 interface SimulationResult {
   executedCount: number;
+  origExecutedCount: number;
   totalCount: number;
+  blockedTradesCount: number;
+  blockedLossesCount: number;
+  blockedAvoidedLossR: number;
   origFinalProfitPct: number;
   simFinalProfitPct: number;
   profitDeltaPct: number;
@@ -40,6 +46,7 @@ interface SimulationResult {
   simMaxDailyDrawdownPct: number;
   worstDayDate: string | null;
   maxStepReached: number;
+  effectiveStepCap: number;
   dailyLimitBreached: boolean;
   totalLimitBreached: boolean;
   points: SimulationPoint[];
@@ -51,6 +58,7 @@ function runProgressionSimulation(
   multiplier: number,
   maxSteps: number,
   antiMartingale: boolean,
+  maxSlPerAsset: number,
 ): SimulationResult {
   const ordered = sortTradesChronologically(trades);
 
@@ -67,9 +75,20 @@ function runProgressionSimulation(
   let simMaxDailyDdPct = 0;
   let worstDayDate: string | null = null;
 
-  let currentStep = 0;
+  let currentWinStep = 0;
+  const dailySlByAsset = new Map<string, number>();
+  const assetLossStepMap = new Map<string, number>();
+
   let maxStepReached = 0;
   let executedCount = 0;
+  let origExecutedCount = 0;
+  let blockedTradesCount = 0;
+  let blockedLossesCount = 0;
+  let blockedAvoidedLossR = 0;
+
+  const effectiveStepCap = antiMartingale
+    ? maxSteps
+    : Math.min(maxSteps, maxSlPerAsset);
 
   const points: SimulationPoint[] = [
     {
@@ -101,14 +120,53 @@ function runProgressionSimulation(
         date: tr.date,
         origEquity: roundTo(origEquity, 2),
         simEquity: roundTo(simEquity, 2),
-        simRiskPct: roundTo(baseRiskPct * Math.pow(multiplier, currentStep), 2),
-        stepUsed: currentStep,
+        simRiskPct: roundTo(
+          baseRiskPct * Math.pow(multiplier, Math.min(effectiveStepCap, currentWinStep)),
+          2,
+        ),
+        stepUsed: 0,
+      });
+      return;
+    }
+
+    origExecutedCount += 1;
+    origEquity = Math.max(0, origEquity * (1 + origTradePct / 100));
+    if (origEquity > origPeak) origPeak = origEquity;
+    if (origPeak > 0) {
+      const dd = ((origPeak - origEquity) / origPeak) * 100;
+      if (dd > origMaxDdPct) origMaxDdPct = dd;
+    }
+
+    const isWin = netR > 0 || (tr.outcome === 'TP' && netR >= 0);
+    const isLoss = netR < 0 || (tr.outcome === 'STOP LOSS' && netR <= 0);
+    const assetKey = (tr.asset || 'ASSET').trim().toUpperCase();
+    const dayAssetKey = `${tr.date || 'NODATE'}|${assetKey}`;
+    const dailyLossesForAsset = dailySlByAsset.get(dayAssetKey) ?? 0;
+
+    // Enforce strict 'Max N SL per Asset' daily stop rule
+    if (dailyLossesForAsset >= maxSlPerAsset) {
+      blockedTradesCount += 1;
+      if (isLoss) {
+        blockedLossesCount += 1;
+        blockedAvoidedLossR += Math.abs(netR);
+      }
+      points.push({
+        index: idx + 1,
+        date: tr.date,
+        origEquity: roundTo(origEquity, 2),
+        simEquity: roundTo(simEquity, 2),
+        simRiskPct: 0,
+        stepUsed: 0,
+        blocked: true,
       });
       return;
     }
 
     executedCount += 1;
-    const stepUsed = currentStep;
+    const rawStep = antiMartingale
+      ? currentWinStep
+      : (assetLossStepMap.get(assetKey) ?? 0);
+    const stepUsed = Math.min(effectiveStepCap, rawStep);
     if (stepUsed > maxStepReached) maxStepReached = stepUsed;
 
     const effectiveRiskPct = Math.max(
@@ -116,13 +174,6 @@ function runProgressionSimulation(
       baseRiskPct * Math.pow(multiplier, stepUsed),
     );
     const simTradePct = netR * effectiveRiskPct;
-
-    origEquity = Math.max(0, origEquity * (1 + origTradePct / 100));
-    if (origEquity > origPeak) origPeak = origEquity;
-    if (origPeak > 0) {
-      const dd = ((origPeak - origEquity) / origPeak) * 100;
-      if (dd > origMaxDdPct) origMaxDdPct = dd;
-    }
 
     simEquity = Math.max(0, simEquity * (1 + simTradePct / 100));
     if (simEquity > simPeak) simPeak = simEquity;
@@ -139,21 +190,26 @@ function runProgressionSimulation(
       }
     }
 
-    // Advance or reset streak based on outcome and mode
-    const isWin = netR > 0 || (tr.outcome === 'TP' && netR >= 0);
-    const isLoss = netR < 0 || (tr.outcome === 'STOP LOSS' && netR <= 0);
+    if (isLoss) {
+      dailySlByAsset.set(dayAssetKey, dailyLossesForAsset + 1);
+    }
 
+    // Advance or reset streak based on outcome and mode (Martingale capped per asset at min(maxSteps, maxSlPerAsset))
     if (antiMartingale) {
       if (isWin) {
-        currentStep = Math.min(maxSteps, currentStep + 1);
+        currentWinStep = Math.min(maxSteps, currentWinStep + 1);
       } else if (isLoss) {
-        currentStep = 0;
+        currentWinStep = 0;
       }
     } else {
+      const prevAssetStep = assetLossStepMap.get(assetKey) ?? 0;
       if (isLoss) {
-        currentStep = Math.min(maxSteps, currentStep + 1);
+        assetLossStepMap.set(
+          assetKey,
+          Math.min(maxSteps, maxSlPerAsset, prevAssetStep + 1),
+        );
       } else if (isWin) {
-        currentStep = 0;
+        assetLossStepMap.set(assetKey, 0);
       }
     }
 
@@ -174,7 +230,11 @@ function runProgressionSimulation(
 
   return {
     executedCount,
+    origExecutedCount,
     totalCount: ordered.length,
+    blockedTradesCount,
+    blockedLossesCount,
+    blockedAvoidedLossR: roundTo(blockedAvoidedLossR, 2),
     origFinalProfitPct,
     simFinalProfitPct,
     profitDeltaPct: roundTo(simFinalProfitPct - origFinalProfitPct, 2),
@@ -183,6 +243,7 @@ function runProgressionSimulation(
     simMaxDailyDrawdownPct,
     worstDayDate,
     maxStepReached,
+    effectiveStepCap,
     dailyLimitBreached: simMaxDailyDrawdownPct > 5,
     totalLimitBreached: simMaxDrawdownPct > 10,
     points,
@@ -200,6 +261,7 @@ export function MartingaleSimulatorCard({
   const [baseRiskPct, setBaseRiskPct] = useState<number>(1.0);
   const [multiplier, setMultiplier] = useState<number>(2.0);
   const [maxSteps, setMaxSteps] = useState<number>(3);
+  const [maxSlPerAsset, setMaxSlPerAsset] = useState<number>(2);
   const [antiMartingale, setAntiMartingale] = useState<boolean>(false);
 
   const activeSourceTrades =
@@ -214,6 +276,9 @@ export function MartingaleSimulatorCard({
   const safeMaxSteps = Number.isFinite(maxSteps)
     ? Math.max(0, Math.min(12, Math.floor(maxSteps)))
     : 3;
+  const safeMaxSlPerAsset = Number.isFinite(maxSlPerAsset)
+    ? Math.max(1, Math.min(10, Math.floor(maxSlPerAsset)))
+    : 2;
 
   const sim = useMemo(
     () =>
@@ -223,6 +288,7 @@ export function MartingaleSimulatorCard({
         safeMultiplier,
         safeMaxSteps,
         antiMartingale,
+        safeMaxSlPerAsset,
       ),
     [
       activeSourceTrades,
@@ -230,26 +296,32 @@ export function MartingaleSimulatorCard({
       safeMultiplier,
       safeMaxSteps,
       antiMartingale,
+      safeMaxSlPerAsset,
     ],
   );
 
+  const effectivePreviewCap = antiMartingale
+    ? safeMaxSteps
+    : Math.min(safeMaxSteps, safeMaxSlPerAsset);
+
   const stepPreview = useMemo(() => {
     const steps: string[] = [];
-    const displayCount = Math.min(safeMaxSteps + 1, 6);
+    const displayCount = Math.min(effectivePreviewCap + 1, 6);
     for (let i = 0; i < displayCount; i += 1) {
       const risk = roundTo(safeBaseRisk * Math.pow(safeMultiplier, i), 2);
       steps.push(`${risk}%`);
     }
-    if (safeMaxSteps + 1 > 6) {
+    if (effectivePreviewCap + 1 > 6) {
       steps.push('...');
     }
     return steps.join(' → ');
-  }, [safeBaseRisk, safeMultiplier, safeMaxSteps]);
+  }, [safeBaseRisk, safeMultiplier, effectivePreviewCap]);
 
   const handleResetDefaults = () => {
     setBaseRiskPct(1.0);
     setMultiplier(2.0);
     setMaxSteps(3);
+    setMaxSlPerAsset(2);
     setAntiMartingale(false);
   };
 
@@ -373,7 +445,7 @@ export function MartingaleSimulatorCard({
       </div>
 
       {/* Controls Bar */}
-      <div className="mt-5 grid grid-cols-1 gap-4 rounded-lg border border-[#1E2634] bg-[#0B0E14] p-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mt-5 grid grid-cols-1 gap-4 rounded-lg border border-[#1E2634] bg-[#0B0E14] p-4 sm:grid-cols-2 lg:grid-cols-5">
         {/* 1. Base Risk % */}
         <div>
           <label
@@ -479,7 +551,43 @@ export function MartingaleSimulatorCard({
           </div>
         </div>
 
-        {/* 4. Anti-Martingale Toggle + Reset */}
+        {/* 4. Max SL per Asset (Giornaliero / Sequenza) */}
+        <div>
+          <label
+            htmlFor="sim-max-sl-asset"
+            className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-slate-400"
+          >
+            Max SL per Asset (Giornaliero / Sequenza)
+          </label>
+          <input
+            id="sim-max-sl-asset"
+            type="number"
+            step="1"
+            min="1"
+            max="10"
+            value={maxSlPerAsset}
+            onChange={(e) => setMaxSlPerAsset(parseInt(e.target.value, 10) || 1)}
+            className="w-full rounded-md border border-[#263042] bg-[#121721] px-3 py-2 font-mono text-xs font-semibold text-slate-100 tabular-nums focus:border-sky-500 focus:outline-none"
+          />
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {[1, 2, 3, 4].map((val) => (
+              <button
+                key={val}
+                type="button"
+                onClick={() => setMaxSlPerAsset(val)}
+                className={`rounded border px-2 py-0.5 font-mono text-[10px] transition-colors ${
+                  safeMaxSlPerAsset === val
+                    ? 'border-indigo-500/60 bg-indigo-500/15 text-indigo-300'
+                    : 'border-[#263042] bg-[#121721] text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {val} SL
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* 5. Anti-Martingale Toggle + Reset */}
         <div className="flex flex-col justify-between gap-2">
           <div>
             <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-slate-400">
@@ -522,13 +630,46 @@ export function MartingaleSimulatorCard({
       </div>
 
       {/* Results Comparison */}
-      {sim.executedCount === 0 ? (
+      {sim.origExecutedCount === 0 ? (
         <div className="mt-5 rounded-lg border border-dashed border-[#263042] bg-[#0B0E14] px-4 py-8 text-center text-xs text-slate-400">
           Nessun trade eseguito disponibile per i filtri selezionati in{' '}
           {dataset === 'live' ? 'Journal Reale' : 'Backtest'}.
         </div>
       ) : (
         <div className="mt-5 space-y-5">
+          {/* Daily Max SL Protection Rule Summary */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-indigo-500/35 bg-indigo-500/10 px-4 py-2.5 text-xs">
+            <div className="flex items-center gap-2 text-indigo-200">
+              <Ban className="h-4 w-4 shrink-0 text-indigo-400" />
+              <span>
+                <strong className="font-semibold text-indigo-100">
+                  Regola Max {safeMaxSlPerAsset} SL per Asset:
+                </strong>{' '}
+                {sim.blockedTradesCount > 0 ? (
+                  <>
+                    bloccati{' '}
+                    <span className="font-mono font-bold text-white tabular-nums">
+                      {sim.blockedTradesCount}
+                    </span>{' '}
+                    trade extra nello stesso giorno ({' '}
+                    <span className="font-mono font-semibold text-emerald-300 tabular-nums">
+                      {sim.blockedLossesCount} SL evitati
+                    </span>
+                    {sim.blockedAvoidedLossR > 0
+                      ? ` · -${sim.blockedAvoidedLossR.toFixed(2)} R risparmiati`
+                      : ''}
+                    )
+                  </>
+                ) : (
+                  'nessun trade extra oltre il limite giornaliero per asset nella sequenza filtrata'
+                )}
+              </span>
+            </div>
+            <span className="rounded border border-indigo-400/30 bg-[#0B0E14]/80 px-2.5 py-0.5 font-mono text-[11px] text-indigo-200 tabular-nums">
+              Cap Martingala: max {sim.effectiveStepCap} step/asset
+            </span>
+          </div>
+
           {/* Original vs Simulated KPI Grid */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div className="rounded-md border border-[#1E2634] bg-[#0B0E14] p-4">
@@ -543,7 +684,7 @@ export function MartingaleSimulatorCard({
                 {formatPct(sim.origFinalProfitPct)}
               </div>
               <div className="mt-1 font-mono text-[11px] text-slate-500 tabular-nums">
-                {sim.executedCount} eseguiti · Base {sim.totalCount} totali
+                {sim.origExecutedCount} eseguiti · Base {sim.totalCount} totali
               </div>
             </div>
 
@@ -574,7 +715,8 @@ export function MartingaleSimulatorCard({
                 {formatPct(sim.simFinalProfitPct)}
               </div>
               <div className="mt-1 font-mono text-[11px] text-slate-400 tabular-nums">
-                Max step raggiunto: {sim.maxStepReached}/{safeMaxSteps}
+                {sim.executedCount} simulati · Max step {sim.maxStepReached}/
+                {sim.effectiveStepCap}
               </div>
             </div>
 
