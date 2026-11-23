@@ -81,7 +81,7 @@ import {
   parseGoogleSheetUrl,
 } from './utils/googleSheets';
 import {
-  buildAssetDateTimeOutcomeKey,
+  buildGoogleSheetTradeSignature,
   buildTradeCoreDuplicateKey,
   deduplicateImportedTrades,
   exportBackupJson,
@@ -1097,7 +1097,7 @@ export function App() {
     showToast(`Collegamento ${source.asset} rimosso.`);
   };
 
-  const buildCategoryFieldKeysMap = (
+  const buildCategorySignaturesMap = (
     tradesList: TradeRecord[],
   ): Record<TradeCategory, Set<string>> => {
     const map: Record<TradeCategory, Set<string>> = {
@@ -1106,7 +1106,7 @@ export function App() {
       missed: new Set<string>(),
     };
     tradesList.forEach((tr) => {
-      map[tr.category].add(buildAssetDateTimeOutcomeKey(tr));
+      map[tr.category].add(buildGoogleSheetTradeSignature(tr));
     });
     return map;
   };
@@ -1115,7 +1115,7 @@ export function App() {
     source: GoogleSheetSource,
     existingMainIds: Set<string>,
     existingMissedIds: Set<string>,
-    existingFieldKeysByCategory: Record<TradeCategory, Set<string>>,
+    existingSignaturesByCategory: Record<TradeCategory, Set<string>>,
   ): Promise<{
     outcome: AssetSyncOutcome;
     addedBt: TradeRecord[];
@@ -1127,9 +1127,10 @@ export function App() {
       source.category === 'missed' ? 'missedTrades' : 'trades';
     const targetExistingIds =
       source.category === 'missed' ? existingMissedIds : existingMainIds;
-    const targetFieldKeys = existingFieldKeysByCategory[source.category];
+    const existingSignatures = existingSignaturesByCategory[source.category];
 
-    // Check Firestore directly before saving by BOTH deterministic ID AND existing trade fields (Asset + Date + Time + Outcome)
+    // Before saving any row, query all existing trades for the user in Firestore
+    // and build a Set of unique signatures: `${asset}_${sheetName}_${date}_${time}_${outcome}`
     if (firebaseUser) {
       const snapshot = await fetchExistingFirestoreTradesAndIds(
         firebaseUser.uid,
@@ -1137,27 +1138,27 @@ export function App() {
       );
       snapshot.ids.forEach((id) => targetExistingIds.add(id));
       snapshot.trades.forEach((tr) => {
-        existingFieldKeysByCategory[tr.category].add(
-          buildAssetDateTimeOutcomeKey(tr),
+        existingSignaturesByCategory[tr.category].add(
+          buildGoogleSheetTradeSignature(tr),
         );
       });
     }
 
     const addedTrades: TradeRecord[] = [];
-    let skippedDuplicates = 0;
+    let skippedCount = 0;
 
     fetched.trades.forEach((tr) => {
-      const fieldKey = buildAssetDateTimeOutcomeKey(tr);
+      const signature = buildGoogleSheetTradeSignature(tr);
       if (
         !tr.id ||
-        targetExistingIds.has(tr.id) ||
-        targetFieldKeys.has(fieldKey)
+        existingSignatures.has(signature) ||
+        targetExistingIds.has(tr.id)
       ) {
-        skippedDuplicates += 1;
+        skippedCount += 1;
         return;
       }
+      existingSignatures.add(signature);
       targetExistingIds.add(tr.id);
-      targetFieldKeys.add(fieldKey);
       addedTrades.push(tr);
     });
 
@@ -1202,7 +1203,8 @@ export function App() {
       await batchCreateMissedTradesInFirestore(firebaseUser.uid, addedMissed);
     }
 
-    const shortStatus = `${skippedDuplicates} vecchi + ${addedTrades.length} nuovi`;
+    const newCount = addedTrades.length;
+    const shortStatus = `${skippedCount} vecchi + ${newCount} nuovi`;
     const summaryMsg = `Sync (${source.asset}): ${shortStatus}`;
     if (firebaseUser) {
       await updateGoogleSheetSyncStatusInFirestore(
@@ -1223,8 +1225,8 @@ export function App() {
         sourceId: source.id,
         asset: source.asset,
         status: 'success',
-        added: addedTrades.length,
-        skipped: skippedDuplicates,
+        added: newCount,
+        skipped: skippedCount,
         tabsScanned,
         message: summaryMsg,
       },
@@ -1243,7 +1245,7 @@ export function App() {
     const existingMissedIds = new Set<string>(
       missedTrades.map((tr) => tr.id),
     );
-    const existingFieldKeysByCategory = buildCategoryFieldKeysMap([
+    const existingSignaturesByCategory = buildCategorySignaturesMap([
       ...backtestTrades,
       ...liveTrades,
       ...missedTrades,
@@ -1255,7 +1257,7 @@ export function App() {
           source,
           existingMainIds,
           existingMissedIds,
-          existingFieldKeysByCategory,
+          existingSignaturesByCategory,
         );
 
       const appendUniqueById = (prev: TradeRecord[], incoming: TradeRecord[]) => {
@@ -1311,7 +1313,7 @@ export function App() {
     const existingMissedIds = new Set<string>(
       missedTrades.map((tr) => tr.id),
     );
-    const existingFieldKeysByCategory = buildCategoryFieldKeysMap([
+    const existingSignaturesByCategory = buildCategorySignaturesMap([
       ...backtestTrades,
       ...liveTrades,
       ...missedTrades,
@@ -1326,13 +1328,13 @@ export function App() {
         mainSnap.ids.forEach((id) => existingMainIds.add(id));
         missedSnap.ids.forEach((id) => existingMissedIds.add(id));
         mainSnap.trades.forEach((tr) => {
-          existingFieldKeysByCategory[tr.category].add(
-            buildAssetDateTimeOutcomeKey(tr),
+          existingSignaturesByCategory[tr.category].add(
+            buildGoogleSheetTradeSignature(tr),
           );
         });
         missedSnap.trades.forEach((tr) => {
-          existingFieldKeysByCategory.missed.add(
-            buildAssetDateTimeOutcomeKey(tr),
+          existingSignaturesByCategory.missed.add(
+            buildGoogleSheetTradeSignature(tr),
           );
         });
       } catch (err) {
@@ -1354,7 +1356,7 @@ export function App() {
           src,
           existingMainIds,
           existingMissedIds,
-          existingFieldKeysByCategory,
+          existingSignaturesByCategory,
         );
         outcomes.push(res.outcome);
         allAddedBt.push(...res.addedBt);

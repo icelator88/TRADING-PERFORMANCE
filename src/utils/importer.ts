@@ -317,15 +317,16 @@ function extractEmbeddedTime(raw: unknown): string {
 }
 
 export function normalizeImportTime(raw: unknown): string {
-  const numericFraction =
+  const numericSerial =
     typeof raw === 'number'
       ? raw
-      : typeof raw === 'string' && /^0(?:[.,]\d+)$/.test(raw.trim())
+      : typeof raw === 'string' && /^\d*(?:[.,]\d+)$/.test(raw.trim())
         ? Number(raw.trim().replace(',', '.'))
         : NaN;
 
-  if (Number.isFinite(numericFraction) && numericFraction >= 0 && numericFraction < 1) {
-    const totalMinutes = Math.round(numericFraction * 24 * 60);
+  if (Number.isFinite(numericSerial) && numericSerial >= 0) {
+    const frac = numericSerial >= 1 ? numericSerial - Math.floor(numericSerial) : numericSerial;
+    const totalMinutes = Math.round(frac * 24 * 60);
     const hh = String(Math.floor(totalMinutes / 60) % 24).padStart(2, '0');
     const mm = String(totalMinutes % 60).padStart(2, '0');
     return `${hh}:${mm}`;
@@ -391,9 +392,35 @@ export function normalizeCanonicalNumberKey(raw: unknown, decimals = 2): string 
 }
 
 /**
- * Composite signature matching normalized Asset + Date + Time + Outcome
- * so legacy trades saved before deterministic row IDs are never duplicated.
+ * Normalized Google Sheets deduplication signature:
+ * `${asset}_${sheetName}_${date}_${time}_${outcome}`
+ * Matches existing Firestore trades (both legacy random-ID trades and deterministic-ID trades).
  */
+export function buildGoogleSheetTradeSignature(
+  trade: Pick<
+    TradeRecord,
+    'asset' | 'setup' | 'strategy' | 'date' | 'entryTime' | 'outcome'
+  >,
+): string {
+  const asset = normalizeAssetKey(trade.asset);
+  const sheetName = normalizeSetupName(
+    String(trade.setup || trade.strategy || 'S1')
+      .replace(/\u00A0/g, ' ')
+      .trim()
+      .replace(/\s+/g, ' '),
+  )
+    .trim()
+    .toUpperCase();
+  const date = normalizeImportDate(trade.date);
+  const normTime = normalizeImportTime(trade.entryTime);
+  const time = /^\d{2}:\d{2}$/.test(normTime) ? normTime : '00:00';
+  const outcome = normalizeOutcome(
+    String(trade.outcome ?? '').replace(/\u00A0/g, ' ').trim(),
+  );
+
+  return `${asset}_${sheetName}_${date}_${time}_${outcome}`;
+}
+
 export function buildAssetDateTimeOutcomeKey(
   trade: Pick<TradeRecord, 'asset' | 'date' | 'entryTime' | 'outcome'>,
 ): string {
