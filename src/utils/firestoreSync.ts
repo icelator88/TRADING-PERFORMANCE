@@ -537,6 +537,42 @@ export async function fetchExistingFirestoreTradeIds(
   }
 }
 
+export async function fetchExistingFirestoreTradesAndIds(
+  uid: string,
+  targetCollection: 'trades' | 'missedTrades',
+): Promise<{ ids: Set<string>; trades: TradeRecord[] }> {
+  const safeUid = sanitizeId(uid, 'user');
+  const colPath = `users/${safeUid}/${targetCollection}`;
+  const q = query(
+    collection(db, 'users', safeUid, targetCollection),
+    where('ownerId', '==', safeUid),
+  );
+
+  try {
+    const snapshot = await getDocs(q);
+    const ids = new Set<string>();
+    const trades: TradeRecord[] = [];
+    snapshot.forEach((docSnap) => {
+      ids.add(docSnap.id);
+      const data = docSnap.data() as Record<string, unknown>;
+      if (typeof data.id === 'string' && data.id.trim()) {
+        ids.add(data.id.trim());
+      }
+      const parsed = docToTradeRecord(
+        data,
+        docSnap.id,
+        targetCollection === 'missedTrades' ? 'missed' : undefined,
+      );
+      if (parsed) {
+        trades.push(parsed);
+      }
+    });
+    return { ids, trades };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, colPath);
+  }
+}
+
 export function subscribeUserTrades(
   uid: string,
   onTrades: (trades: TradeRecord[]) => void,

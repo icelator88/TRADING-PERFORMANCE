@@ -599,12 +599,12 @@ export function GoogleSheetsSyncModal({
                 <span className="font-semibold text-slate-100">
                   {lang === 'en' ? 'Current sync summary:' : 'Riepilogo sincronizzazione:'}
                 </span>{' '}
+                <span className="font-mono text-slate-300">
+                  {aggregateSkipped} vecchi
+                </span>{' '}
+                <span className="text-slate-500">+</span>{' '}
                 <span className="font-mono font-semibold text-emerald-400">
-                  +{aggregateAdded} {lang === 'en' ? 'new' : 'new'}
-                </span>
-                <span className="text-slate-500">, </span>
-                <span className="font-mono text-slate-400">
-                  {aggregateSkipped} skipped
+                  {aggregateAdded} nuovi
                 </span>
               </div>
               {aggregateAdded > 0 ? (

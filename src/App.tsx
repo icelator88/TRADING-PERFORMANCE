@@ -60,7 +60,7 @@ import {
   deleteMissedTradeInFirestore,
   deleteTradeInFirestore,
   ensureUserProfile,
-  fetchExistingFirestoreTradeIds,
+  fetchExistingFirestoreTradesAndIds,
   fetchUserMissedTradesFromFirestore,
   fetchUserTradesFromFirestore,
   migrateLegacyMissedTradesFromTradesCollection,
@@ -81,6 +81,7 @@ import {
   parseGoogleSheetUrl,
 } from './utils/googleSheets';
 import {
+  buildAssetDateTimeOutcomeKey,
   buildTradeCoreDuplicateKey,
   deduplicateImportedTrades,
   exportBackupJson,
@@ -1096,10 +1097,25 @@ export function App() {
     showToast(`Collegamento ${source.asset} rimosso.`);
   };
 
+  const buildCategoryFieldKeysMap = (
+    tradesList: TradeRecord[],
+  ): Record<TradeCategory, Set<string>> => {
+    const map: Record<TradeCategory, Set<string>> = {
+      backtest: new Set<string>(),
+      live: new Set<string>(),
+      missed: new Set<string>(),
+    };
+    tradesList.forEach((tr) => {
+      map[tr.category].add(buildAssetDateTimeOutcomeKey(tr));
+    });
+    return map;
+  };
+
   const runGoogleSheetSyncForSource = async (
     source: GoogleSheetSource,
     existingMainIds: Set<string>,
     existingMissedIds: Set<string>,
+    existingFieldKeysByCategory: Record<TradeCategory, Set<string>>,
   ): Promise<{
     outcome: AssetSyncOutcome;
     addedBt: TradeRecord[];
@@ -1111,25 +1127,37 @@ export function App() {
       source.category === 'missed' ? 'missedTrades' : 'trades';
     const targetExistingIds =
       source.category === 'missed' ? existingMissedIds : existingMainIds;
+    const targetFieldKeys = existingFieldKeysByCategory[source.category];
 
-    // Check Firestore directly before saving to guarantee existing deterministic IDs are skipped
+    // Check Firestore directly before saving by BOTH deterministic ID AND existing trade fields (Asset + Date + Time + Outcome)
     if (firebaseUser) {
-      const firestoreIds = await fetchExistingFirestoreTradeIds(
+      const snapshot = await fetchExistingFirestoreTradesAndIds(
         firebaseUser.uid,
         targetCollection,
       );
-      firestoreIds.forEach((id) => targetExistingIds.add(id));
+      snapshot.ids.forEach((id) => targetExistingIds.add(id));
+      snapshot.trades.forEach((tr) => {
+        existingFieldKeysByCategory[tr.category].add(
+          buildAssetDateTimeOutcomeKey(tr),
+        );
+      });
     }
 
     const addedTrades: TradeRecord[] = [];
     let skippedDuplicates = 0;
 
     fetched.trades.forEach((tr) => {
-      if (!tr.id || targetExistingIds.has(tr.id)) {
+      const fieldKey = buildAssetDateTimeOutcomeKey(tr);
+      if (
+        !tr.id ||
+        targetExistingIds.has(tr.id) ||
+        targetFieldKeys.has(fieldKey)
+      ) {
         skippedDuplicates += 1;
         return;
       }
       targetExistingIds.add(tr.id);
+      targetFieldKeys.add(fieldKey);
       addedTrades.push(tr);
     });
 
@@ -1174,14 +1202,8 @@ export function App() {
       await batchCreateMissedTradesInFirestore(firebaseUser.uid, addedMissed);
     }
 
-    const summaryMsg =
-      lang === 'en'
-        ? `Sync (${source.asset}): +${addedTrades.length} new, ${skippedDuplicates} skipped`
-        : lang === 'es'
-          ? `Sync (${source.asset}): +${addedTrades.length} nuevos, ${skippedDuplicates} omitidos`
-          : `Sync (${source.asset}): +${addedTrades.length} new, ${skippedDuplicates} skipped`;
-
-    const shortStatus = `+${addedTrades.length} new, ${skippedDuplicates} skipped`;
+    const shortStatus = `${skippedDuplicates} vecchi + ${addedTrades.length} nuovi`;
+    const summaryMsg = `Sync (${source.asset}): ${shortStatus}`;
     if (firebaseUser) {
       await updateGoogleSheetSyncStatusInFirestore(
         firebaseUser.uid,
@@ -1221,6 +1243,11 @@ export function App() {
     const existingMissedIds = new Set<string>(
       missedTrades.map((tr) => tr.id),
     );
+    const existingFieldKeysByCategory = buildCategoryFieldKeysMap([
+      ...backtestTrades,
+      ...liveTrades,
+      ...missedTrades,
+    ]);
 
     try {
       const { outcome, addedBt, addedLive, addedMissed } =
@@ -1228,6 +1255,7 @@ export function App() {
           source,
           existingMainIds,
           existingMissedIds,
+          existingFieldKeysByCategory,
         );
 
       const appendUniqueById = (prev: TradeRecord[], incoming: TradeRecord[]) => {
@@ -1283,15 +1311,30 @@ export function App() {
     const existingMissedIds = new Set<string>(
       missedTrades.map((tr) => tr.id),
     );
+    const existingFieldKeysByCategory = buildCategoryFieldKeysMap([
+      ...backtestTrades,
+      ...liveTrades,
+      ...missedTrades,
+    ]);
 
     if (firebaseUser) {
       try {
-        const [dbMainIds, dbMissedIds] = await Promise.all([
-          fetchExistingFirestoreTradeIds(firebaseUser.uid, 'trades'),
-          fetchExistingFirestoreTradeIds(firebaseUser.uid, 'missedTrades'),
+        const [mainSnap, missedSnap] = await Promise.all([
+          fetchExistingFirestoreTradesAndIds(firebaseUser.uid, 'trades'),
+          fetchExistingFirestoreTradesAndIds(firebaseUser.uid, 'missedTrades'),
         ]);
-        dbMainIds.forEach((id) => existingMainIds.add(id));
-        dbMissedIds.forEach((id) => existingMissedIds.add(id));
+        mainSnap.ids.forEach((id) => existingMainIds.add(id));
+        missedSnap.ids.forEach((id) => existingMissedIds.add(id));
+        mainSnap.trades.forEach((tr) => {
+          existingFieldKeysByCategory[tr.category].add(
+            buildAssetDateTimeOutcomeKey(tr),
+          );
+        });
+        missedSnap.trades.forEach((tr) => {
+          existingFieldKeysByCategory.missed.add(
+            buildAssetDateTimeOutcomeKey(tr),
+          );
+        });
       } catch (err) {
         setFatalError(err instanceof Error ? err : new Error(String(err)));
         return [];
@@ -1311,6 +1354,7 @@ export function App() {
           src,
           existingMainIds,
           existingMissedIds,
+          existingFieldKeysByCategory,
         );
         outcomes.push(res.outcome);
         allAddedBt.push(...res.addedBt);
@@ -1362,12 +1406,7 @@ export function App() {
     });
     setShowLastSyncedOnly(newlyAdded.length > 0);
 
-    const baseAllMsg =
-      lang === 'en'
-        ? `Sync complete: +${totalAdded} new, ${totalSkipped} skipped`
-        : lang === 'es'
-          ? `Sincronización completada: +${totalAdded} nuevos, ${totalSkipped} omitidos`
-          : `Sincronizzazione completata: +${totalAdded} new, ${totalSkipped} skipped`;
+    const baseAllMsg = `Sincronizzazione completata: ${totalSkipped} vecchi + ${totalAdded} nuovi`;
 
     showToast(
       errorCount > 0 ? `${baseAllMsg} (${errorCount} asset con errore)` : baseAllMsg,
@@ -2191,12 +2230,12 @@ export function App() {
                     {lastSyncStats ? (
                       <span className="font-medium text-slate-200">
                         Sync {lastSyncStats.label}:{' '}
+                        <span className="font-mono text-slate-300">
+                          {lastSyncStats.skipped} vecchi
+                        </span>{' '}
+                        <span className="text-slate-500">+</span>{' '}
                         <span className="font-mono font-semibold text-emerald-400">
-                          +{lastSyncStats.added} new
-                        </span>
-                        <span className="text-slate-500">, </span>
-                        <span className="font-mono text-slate-400">
-                          {lastSyncStats.skipped} skipped
+                          {lastSyncStats.added} nuovi
                         </span>
                       </span>
                     ) : null}

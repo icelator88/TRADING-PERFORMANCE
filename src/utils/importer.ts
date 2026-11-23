@@ -391,6 +391,21 @@ export function normalizeCanonicalNumberKey(raw: unknown, decimals = 2): string 
 }
 
 /**
+ * Composite signature matching normalized Asset + Date + Time + Outcome
+ * so legacy trades saved before deterministic row IDs are never duplicated.
+ */
+export function buildAssetDateTimeOutcomeKey(
+  trade: Pick<TradeRecord, 'asset' | 'date' | 'entryTime' | 'outcome'>,
+): string {
+  const symbol = normalizeAssetKey(trade.asset);
+  const openTimestamp = normalizeOpenTimestamp(trade.date, trade.entryTime);
+  const outcomeKey = normalizeOutcome(
+    String(trade.outcome ?? '').replace(/\u00A0/g, ' ').trim(),
+  );
+  return `${symbol}|${openTimestamp}|${outcomeKey}`;
+}
+
+/**
  * Core composite duplicate signature matching:
  * Normalized Asset + Strategy + Date + Time + Direction + Outcome + #R
  * Ensures formatting variations ('08/01/2025' vs '8/1/2025', '4,00' vs '4.00' vs '4',
