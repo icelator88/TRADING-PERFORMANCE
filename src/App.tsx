@@ -81,11 +81,11 @@ import {
   parseGoogleSheetUrl,
 } from './utils/googleSheets';
 import {
-  buildGoogleSheetTradeSignature,
   buildTradeCoreDuplicateKey,
   deduplicateImportedTrades,
   exportBackupJson,
   exportTradesCsv,
+  getTradeKey,
   parseBackupJsonContent,
 } from './utils/importer';
 import {
@@ -1097,7 +1097,7 @@ export function App() {
     showToast(`Collegamento ${source.asset} rimosso.`);
   };
 
-  const buildCategorySignaturesMap = (
+  const buildCategoryKeysMap = (
     tradesList: TradeRecord[],
   ): Record<TradeCategory, Set<string>> => {
     const map: Record<TradeCategory, Set<string>> = {
@@ -1106,7 +1106,7 @@ export function App() {
       missed: new Set<string>(),
     };
     tradesList.forEach((tr) => {
-      map[tr.category].add(buildGoogleSheetTradeSignature(tr));
+      map[tr.category].add(getTradeKey(tr));
     });
     return map;
   };
@@ -1115,7 +1115,8 @@ export function App() {
     source: GoogleSheetSource,
     existingMainIds: Set<string>,
     existingMissedIds: Set<string>,
-    existingSignaturesByCategory: Record<TradeCategory, Set<string>>,
+    existingKeysByCategory: Record<TradeCategory, Set<string>>,
+    skipFirestoreQuery = false,
   ): Promise<{
     outcome: AssetSyncOutcome;
     addedBt: TradeRecord[];
@@ -1127,20 +1128,17 @@ export function App() {
       source.category === 'missed' ? 'missedTrades' : 'trades';
     const targetExistingIds =
       source.category === 'missed' ? existingMissedIds : existingMainIds;
-    const existingSignatures = existingSignaturesByCategory[source.category];
+    const existingKeys = existingKeysByCategory[source.category];
 
-    // Before saving any row, query all existing trades for the user in Firestore
-    // and build a Set of unique signatures: `${asset}_${sheetName}_${date}_${time}_${outcome}`
-    if (firebaseUser) {
+    // Before importing, generate getTradeKey for all existing Firestore trades of the user and store them in a Set
+    if (firebaseUser && !skipFirestoreQuery) {
       const snapshot = await fetchExistingFirestoreTradesAndIds(
         firebaseUser.uid,
         targetCollection,
       );
       snapshot.ids.forEach((id) => targetExistingIds.add(id));
       snapshot.trades.forEach((tr) => {
-        existingSignaturesByCategory[tr.category].add(
-          buildGoogleSheetTradeSignature(tr),
-        );
+        existingKeysByCategory[tr.category].add(getTradeKey(tr));
       });
     }
 
@@ -1148,16 +1146,12 @@ export function App() {
     let skippedCount = 0;
 
     fetched.trades.forEach((tr) => {
-      const signature = buildGoogleSheetTradeSignature(tr);
-      if (
-        !tr.id ||
-        existingSignatures.has(signature) ||
-        targetExistingIds.has(tr.id)
-      ) {
+      const tradeKey = getTradeKey(tr);
+      if (!tr.id || existingKeys.has(tradeKey) || targetExistingIds.has(tr.id)) {
         skippedCount += 1;
         return;
       }
-      existingSignatures.add(signature);
+      existingKeys.add(tradeKey);
       targetExistingIds.add(tr.id);
       addedTrades.push(tr);
     });
@@ -1240,16 +1234,14 @@ export function App() {
     source: GoogleSheetSource,
   ): Promise<AssetSyncOutcome> => {
     const existingMainIds = new Set<string>(
-      [...backtestTrades, ...liveTrades].map((tr) => tr.id),
+      firebaseUser ? [] : [...backtestTrades, ...liveTrades].map((tr) => tr.id),
     );
     const existingMissedIds = new Set<string>(
-      missedTrades.map((tr) => tr.id),
+      firebaseUser ? [] : missedTrades.map((tr) => tr.id),
     );
-    const existingSignaturesByCategory = buildCategorySignaturesMap([
-      ...backtestTrades,
-      ...liveTrades,
-      ...missedTrades,
-    ]);
+    const existingKeysByCategory = buildCategoryKeysMap(
+      firebaseUser ? [] : [...backtestTrades, ...liveTrades, ...missedTrades],
+    );
 
     try {
       const { outcome, addedBt, addedLive, addedMissed } =
@@ -1257,7 +1249,8 @@ export function App() {
           source,
           existingMainIds,
           existingMissedIds,
-          existingSignaturesByCategory,
+          existingKeysByCategory,
+          false,
         );
 
       const appendUniqueById = (prev: TradeRecord[], incoming: TradeRecord[]) => {
@@ -1308,16 +1301,14 @@ export function App() {
     onProgress?: (currentIndex: number, total: number, asset: string) => void,
   ): Promise<AssetSyncOutcome[]> => {
     const existingMainIds = new Set<string>(
-      [...backtestTrades, ...liveTrades].map((tr) => tr.id),
+      firebaseUser ? [] : [...backtestTrades, ...liveTrades].map((tr) => tr.id),
     );
     const existingMissedIds = new Set<string>(
-      missedTrades.map((tr) => tr.id),
+      firebaseUser ? [] : missedTrades.map((tr) => tr.id),
     );
-    const existingSignaturesByCategory = buildCategorySignaturesMap([
-      ...backtestTrades,
-      ...liveTrades,
-      ...missedTrades,
-    ]);
+    const existingKeysByCategory = buildCategoryKeysMap(
+      firebaseUser ? [] : [...backtestTrades, ...liveTrades, ...missedTrades],
+    );
 
     if (firebaseUser) {
       try {
@@ -1328,14 +1319,10 @@ export function App() {
         mainSnap.ids.forEach((id) => existingMainIds.add(id));
         missedSnap.ids.forEach((id) => existingMissedIds.add(id));
         mainSnap.trades.forEach((tr) => {
-          existingSignaturesByCategory[tr.category].add(
-            buildGoogleSheetTradeSignature(tr),
-          );
+          existingKeysByCategory[tr.category].add(getTradeKey(tr));
         });
         missedSnap.trades.forEach((tr) => {
-          existingSignaturesByCategory.missed.add(
-            buildGoogleSheetTradeSignature(tr),
-          );
+          existingKeysByCategory.missed.add(getTradeKey(tr));
         });
       } catch (err) {
         setFatalError(err instanceof Error ? err : new Error(String(err)));
@@ -1356,7 +1343,8 @@ export function App() {
           src,
           existingMainIds,
           existingMissedIds,
-          existingSignaturesByCategory,
+          existingKeysByCategory,
+          Boolean(firebaseUser),
         );
         outcomes.push(res.outcome);
         allAddedBt.push(...res.addedBt);

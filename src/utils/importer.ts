@@ -317,45 +317,54 @@ function extractEmbeddedTime(raw: unknown): string {
 }
 
 export function normalizeImportTime(raw: unknown): string {
-  const numericSerial =
-    typeof raw === 'number'
-      ? raw
-      : typeof raw === 'string' && /^\d*(?:[.,]\d+)$/.test(raw.trim())
-        ? Number(raw.trim().replace(',', '.'))
-        : NaN;
-
-  if (Number.isFinite(numericSerial) && numericSerial >= 0) {
-    const frac = numericSerial >= 1 ? numericSerial - Math.floor(numericSerial) : numericSerial;
-    const totalMinutes = Math.round(frac * 24 * 60);
-    const hh = String(Math.floor(totalMinutes / 60) % 24).padStart(2, '0');
-    const mm = String(totalMinutes % 60).padStart(2, '0');
-    return `${hh}:${mm}`;
-  }
-
   if (raw instanceof Date && !Number.isNaN(raw.getTime())) {
     const hh = String(raw.getHours()).padStart(2, '0');
     const mm = String(raw.getMinutes()).padStart(2, '0');
     return `${hh}:${mm}`;
   }
 
-  const s = String(raw ?? '')
-    .replace(/\u00A0/g, ' ')
-    .trim();
-  if (!s) return '';
+  if (typeof raw === 'string') {
+    const s = raw.replace(/\u00A0/g, ' ').trim();
+    if (!s) return '';
 
-  const m = /^(\d{1,2})\s*[:.h]\s*(\d{2})(?:\s*[:.]\s*\d{2})?\s*(AM|PM)?$/i.exec(s);
-  if (m) {
-    let hh = Number(m[1]);
-    const mm = Number(m[2]);
-    const ampm = m[3]?.toUpperCase();
-    if (ampm === 'PM' && hh < 12) hh += 12;
-    if (ampm === 'AM' && hh === 12) hh = 0;
-    if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59) {
-      return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    const clockMatch =
+      /^(\d{1,2})\s*[:.h]\s*(\d{2})(?:\s*[:.]\s*\d{2}(?:[.,]\d+)?)?\s*(AM|PM)?(?:\s.*)?$/i.exec(
+        s,
+      );
+    if (clockMatch) {
+      let hh = Number(clockMatch[1]);
+      const mm = Number(clockMatch[2]);
+      const ampm = clockMatch[3]?.toUpperCase();
+      if (ampm === 'PM' && hh < 12) hh += 12;
+      if (ampm === 'AM' && hh === 12) hh = 0;
+      if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59) {
+        return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+      }
     }
+
+    const serialMatch = /^(?:0|\d{5})[.,]\d+$/.test(s)
+      ? Number(s.replace(',', '.'))
+      : NaN;
+    if (Number.isFinite(serialMatch) && serialMatch >= 0) {
+      const frac = serialMatch >= 1 ? serialMatch - Math.floor(serialMatch) : serialMatch;
+      const totalMinutes = Math.round(frac * 24 * 60);
+      const hh = String(Math.floor(totalMinutes / 60) % 24).padStart(2, '0');
+      const mm = String(totalMinutes % 60).padStart(2, '0');
+      return `${hh}:${mm}`;
+    }
+
+    return extractEmbeddedTime(s) || s;
   }
 
-  return extractEmbeddedTime(s) || s;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) {
+    const frac = raw >= 1 ? raw - Math.floor(raw) : raw;
+    const totalMinutes = Math.round(frac * 24 * 60);
+    const hh = String(Math.floor(totalMinutes / 60) % 24).padStart(2, '0');
+    const mm = String(totalMinutes % 60).padStart(2, '0');
+    return `${hh}:${mm}`;
+  }
+
+  return '';
 }
 
 function formatExcelTimeCell(raw: unknown): string {
@@ -392,10 +401,42 @@ export function normalizeCanonicalNumberKey(raw: unknown, decimals = 2): string 
 }
 
 /**
- * Normalized Google Sheets deduplication signature:
- * `${asset}_${sheetName}_${date}_${time}_${outcome}`
- * Matches existing Firestore trades (both legacy random-ID trades and deterministic-ID trades).
+ * Bulletproof deduplication key: `${asset}_${date}_${time}_${outcome}`
+ * - asset: uppercase, trimmed, alphanumeric (e.g. "CHF/JPY" -> "CHFJPY")
+ * - date: strict YYYY-MM-DD
+ * - time: strict HH:mm (ignores seconds; falls back to embedded time or "00:00")
+ * - outcome: uppercase, trimmed (TP, SL, BE, UF)
  */
+export function getTradeKey(
+  trade: Pick<TradeRecord, 'asset' | 'date' | 'entryTime' | 'outcome'>,
+): string {
+  const asset = String(trade.asset ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+
+  const parsedDate = normalizeImportDate(trade.date);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(parsedDate)
+    ? parsedDate
+    : String(trade.date ?? '').trim();
+
+  const embeddedTime = extractEmbeddedTime(trade.date);
+  const normTime = normalizeImportTime(trade.entryTime) || embeddedTime;
+  const time = /^\d{2}:\d{2}$/.test(normTime) ? normTime : '00:00';
+
+  const normOutcome = normalizeOutcome(
+    String(trade.outcome ?? '').replace(/\u00A0/g, ' ').trim(),
+  );
+  const outcome =
+    normOutcome === 'STOP LOSS'
+      ? 'SL'
+      : normOutcome === 'UNFILLED'
+        ? 'UF'
+        : normOutcome;
+
+  return `${asset}_${date}_${time}_${outcome}`;
+}
+
 export function buildGoogleSheetTradeSignature(
   trade: Pick<
     TradeRecord,
