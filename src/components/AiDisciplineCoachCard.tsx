@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Sparkles } from 'lucide-react';
+import { ArrowUpRight, Sparkles } from 'lucide-react';
 import type { Language, PerformanceStats, TradeRecord } from '../types/trading';
 import {
   computeDisciplineMetrics,
+  type LastMistakeInfo,
   requestAiDisciplineCoachFeedback,
 } from '../utils/aiDisciplineCoach';
+import { formatDisplayDate } from '../utils/calculations';
 
 interface AiDisciplineCoachCardProps {
   lang: Language;
@@ -17,6 +19,7 @@ interface AiDisciplineCoachCardProps {
   liveTrades: TradeRecord[];
   backtestTrades: TradeRecord[];
   missedTrades: TradeRecord[];
+  onLastMistakeClick?: (mistake: LastMistakeInfo) => void;
 }
 
 export function AiDisciplineCoachCard({
@@ -30,6 +33,7 @@ export function AiDisciplineCoachCard({
   liveTrades,
   backtestTrades,
   missedTrades,
+  onLastMistakeClick,
 }: AiDisciplineCoachCardProps) {
   const [loading, setLoading] = useState(false);
   const [bullets, setBullets] = useState<string[]>([]);
@@ -171,6 +175,45 @@ export function AiDisciplineCoachCard({
               ? `Piano meccanico rispettato senza errori non forzati (${metrics.totalTrackedDays} gg totali)`
               : 'Nessuna sessione live tracciata'}
           </div>
+          {metrics.hasData && metrics.lastMistake ? (
+            <button
+              type="button"
+              onClick={() => onLastMistakeClick?.(metrics.lastMistake!)}
+              className="mt-2.5 inline-flex flex-wrap items-center gap-1.5 rounded border border-rose-500/35 bg-rose-500/10 px-2 py-1 text-left font-mono text-[11px] font-medium text-rose-300 transition-colors hover:border-rose-400/70 hover:bg-rose-500/20 hover:text-rose-200 focus:outline-none focus:ring-1 focus:ring-rose-400"
+              title={
+                metrics.lastMistake.category === 'live'
+                  ? 'Apri e evidenzia in Journal Reale'
+                  : 'Apri e evidenzia in Trade Non Presi'
+              }
+            >
+              <span>
+                {lang === 'en'
+                  ? 'Last mistake:'
+                  : lang === 'es'
+                    ? 'Último error:'
+                    : 'Ultimo errore:'}{' '}
+                <span className="font-semibold underline decoration-rose-400/60 underline-offset-2">
+                  {formatDisplayDate(metrics.lastMistake.date)}
+                </span>
+              </span>
+              <span className="text-[10px] text-rose-400/90">
+                (
+                {metrics.lastMistake.category === 'live'
+                  ? 'Journal Reale'
+                  : 'Trade Non Presi'}
+                )
+              </span>
+              <ArrowUpRight className="h-3 w-3 shrink-0 text-rose-400" />
+            </button>
+          ) : metrics.hasData ? (
+            <div className="mt-2 font-mono text-[11px] text-emerald-400/80">
+              {lang === 'en'
+                ? 'No mistakes recorded'
+                : lang === 'es'
+                  ? 'Sin errores registrados'
+                  : 'Nessun errore rilevato'}
+            </div>
+          ) : null}
         </div>
 
         {/* KPI 3: Estimated Mistake Probability */}

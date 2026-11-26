@@ -74,6 +74,7 @@ import {
   upsertMissedTradeInFirestore,
   upsertTradeInFirestore,
 } from './utils/firestoreSync';
+import type { LastMistakeInfo } from './utils/aiDisciplineCoach';
 import { analizzaTradeConGemini, buildGeminiReviewPrompt } from './utils/geminiReview';
 import {
   fetchAndParseGoogleSheetTrades,
@@ -117,6 +118,8 @@ export function App() {
   const [dashboardRangeMode, setDashboardRangeMode] = useState<
     'live_period' | 'all_backtest'
   >('live_period');
+  const [focusedMistakeFilter, setFocusedMistakeFilter] =
+    useState<LastMistakeInfo | null>(null);
 
   // Modals
   const [tradeModalOpen, setTradeModalOpen] = useState(false);
@@ -213,8 +216,18 @@ export function App() {
   };
 
   const handleTabChange = (nextTab: ActiveTab) => {
+    setFocusedMistakeFilter(null);
     setActiveTab(nextTab);
     syncSettingsPatch({ activeTab: nextTab });
+  };
+
+  const handleLastMistakeClick = (mistake: LastMistakeInfo) => {
+    setSearchQuery('');
+    setOutcomeFilter('ALL');
+    setReasonFilter('ALL');
+    setFocusedMistakeFilter(mistake);
+    setActiveTab(mistake.category);
+    syncSettingsPatch({ activeTab: mistake.category });
   };
 
   const handleSetupChange = (nextSetup: string) => {
@@ -2555,6 +2568,7 @@ export function App() {
                       })
                     : dashboardPortfolioMissed
               }
+              onLastMistakeClick={handleLastMistakeClick}
             />
 
             {/* Dual Date-Aligned Equity Curve */}
@@ -3028,11 +3042,68 @@ export function App() {
               </div>
             </div>
 
+            {focusedMistakeFilter && focusedMistakeFilter.category === 'live' ? (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-xs">
+                <div className="flex flex-wrap items-center gap-2 text-rose-200">
+                  <span className="font-semibold">
+                    {lang === 'en'
+                      ? `Filtered by last mistake date: ${formatDisplayDate(focusedMistakeFilter.date)}`
+                      : lang === 'es'
+                        ? `Filtrado por fecha del último error: ${formatDisplayDate(focusedMistakeFilter.date)}`
+                        : `Filtro attivo su ultimo errore: ${formatDisplayDate(focusedMistakeFilter.date)}`}
+                  </span>
+                  <span className="text-rose-300/80">
+                    ({focusedMistakeFilter.tradeIds.length}{' '}
+                    {focusedMistakeFilter.tradeIds.length === 1
+                      ? lang === 'en'
+                        ? 'entry highlighted'
+                        : 'voce evidenziata'
+                      : lang === 'en'
+                        ? 'entries highlighted'
+                        : 'voci evidenziate'}
+                    )
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFocusedMistakeFilter(null)}
+                  className="rounded border border-rose-400/40 bg-[#0B0E14] px-2.5 py-1 font-medium text-rose-200 transition-colors hover:border-rose-300 hover:text-white"
+                >
+                  {lang === 'en'
+                    ? 'Show all trades'
+                    : lang === 'es'
+                      ? 'Mostrar todas las operaciones'
+                      : 'Mostra tutti i trade'}
+                </button>
+              </div>
+            ) : null}
+
             <TradeTable
-              trades={applySearchAndSubFilters(dashboardPortfolioLive, 'live')}
+              trades={(() => {
+                const base = applySearchAndSubFilters(dashboardPortfolioLive, 'live');
+                if (focusedMistakeFilter?.category !== 'live') return base;
+                const byDateInPortfolio = base.filter(
+                  (tr) => tr.date === focusedMistakeFilter.date,
+                );
+                if (byDateInPortfolio.length > 0) return byDateInPortfolio;
+                return liveTrades.filter(
+                  (tr) =>
+                    tr.category === 'live' && tr.date === focusedMistakeFilter.date,
+                );
+              })()}
               category="live"
               t={t}
               emptyMessage={t.journal.emptyLive}
+              highlightedTradeIds={
+                focusedMistakeFilter?.category === 'live'
+                  ? focusedMistakeFilter.tradeIds
+                  : undefined
+              }
+              highlightDate={
+                focusedMistakeFilter?.category === 'live'
+                  ? focusedMistakeFilter.date
+                  : null
+              }
               onAddFirst={() => {
                 setEditingTrade(null);
                 setTradeModalCategory('live');
@@ -3183,11 +3254,69 @@ export function App() {
               </div>
             </div>
 
+            {focusedMistakeFilter && focusedMistakeFilter.category === 'missed' ? (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-xs">
+                <div className="flex flex-wrap items-center gap-2 text-rose-200">
+                  <span className="font-semibold">
+                    {lang === 'en'
+                      ? `Filtered by last mistake date: ${formatDisplayDate(focusedMistakeFilter.date)}`
+                      : lang === 'es'
+                        ? `Filtrado por fecha del último error: ${formatDisplayDate(focusedMistakeFilter.date)}`
+                        : `Filtro attivo su ultimo errore: ${formatDisplayDate(focusedMistakeFilter.date)}`}
+                  </span>
+                  <span className="text-rose-300/80">
+                    ({focusedMistakeFilter.tradeIds.length}{' '}
+                    {focusedMistakeFilter.tradeIds.length === 1
+                      ? lang === 'en'
+                        ? 'entry highlighted'
+                        : 'voce evidenziata'
+                      : lang === 'en'
+                        ? 'entries highlighted'
+                        : 'voci evidenziate'}
+                    )
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFocusedMistakeFilter(null)}
+                  className="rounded border border-rose-400/40 bg-[#0B0E14] px-2.5 py-1 font-medium text-rose-200 transition-colors hover:border-rose-300 hover:text-white"
+                >
+                  {lang === 'en'
+                    ? 'Show all entries'
+                    : lang === 'es'
+                      ? 'Mostrar todos los registros'
+                      : 'Mostra tutti i trade'}
+                </button>
+              </div>
+            ) : null}
+
             <TradeTable
-              trades={applySearchAndSubFilters(filteredMissed, 'missed')}
+              trades={(() => {
+                const base = applySearchAndSubFilters(filteredMissed, 'missed');
+                if (focusedMistakeFilter?.category !== 'missed') return base;
+                const byDateInFiltered = base.filter(
+                  (tr) => tr.date === focusedMistakeFilter.date,
+                );
+                if (byDateInFiltered.length > 0) return byDateInFiltered;
+                return missedTrades.filter(
+                  (tr) =>
+                    tr.category === 'missed' &&
+                    tr.date === focusedMistakeFilter.date,
+                );
+              })()}
               category="missed"
               t={t}
               emptyMessage={t.journal.emptyMissed}
+              highlightedTradeIds={
+                focusedMistakeFilter?.category === 'missed'
+                  ? focusedMistakeFilter.tradeIds
+                  : undefined
+              }
+              highlightDate={
+                focusedMistakeFilter?.category === 'missed'
+                  ? focusedMistakeFilter.date
+                  : null
+              }
               onAddFirst={() => {
                 setEditingTrade(null);
                 setTradeModalCategory('missed');

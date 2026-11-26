@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useRef } from 'react';
 import { ExternalLink } from 'lucide-react';
 import type { TranslationSet } from '../i18n/translations';
 import type { TradeCategory, TradeRecord } from '../types/trading';
@@ -13,6 +14,8 @@ interface TradeTableProps {
   category: TradeCategory;
   t: TranslationSet;
   emptyMessage: string;
+  highlightedTradeIds?: string[];
+  highlightDate?: string | null;
   onAddFirst: () => void;
   onLoadDemo?: () => void;
   onEdit: (trade: TradeRecord) => void;
@@ -24,12 +27,39 @@ export function TradeTable({
   category,
   t,
   emptyMessage,
+  highlightedTradeIds,
+  highlightDate,
   onAddFirst,
   onLoadDemo,
   onEdit,
   onDelete,
 }: TradeTableProps) {
   const ordered = sortTradesChronologically(trades).reverse();
+  const tableContainerRef = useRef<HTMLDivElement | null>(null);
+
+  const highlightedSet = useMemo(
+    () => new Set(highlightedTradeIds ?? []),
+    [highlightedTradeIds],
+  );
+
+  const highlightSignature = `${highlightDate ?? ''}|${(highlightedTradeIds ?? []).join(',')}`;
+
+  useEffect(() => {
+    if (!highlightDate && highlightedSet.size === 0) return;
+    const timer = window.setTimeout(() => {
+      const container = tableContainerRef.current;
+      if (!container) return;
+      const targetRow = container.querySelector<HTMLTableRowElement>(
+        'tr[data-highlighted-mistake="true"]',
+      );
+      if (targetRow) {
+        targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } else {
+        container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [highlightSignature, highlightDate, highlightedSet.size, ordered.length]);
 
   // Discover dynamic extra column keys present across visible rows
   const extraKeys = Array.from(
@@ -65,7 +95,10 @@ export function TradeTable({
   }
 
   return (
-    <div className="overflow-hidden rounded-lg border border-[#1E2634] bg-[#121721]">
+    <div
+      ref={tableContainerRef}
+      className="overflow-hidden rounded-lg border border-[#1E2634] bg-[#121721]"
+    >
       <div className="overflow-x-auto">
         <table className="w-full border-collapse text-left text-xs">
           <thead>
@@ -119,13 +152,30 @@ export function TradeTable({
                     ? `${trade.targetRR.toFixed(2)}R`
                     : '—';
 
+              const isHighlighted =
+                highlightedSet.has(trade.id) ||
+                (highlightedSet.size === 0 &&
+                  Boolean(highlightDate && trade.date === highlightDate));
+
               return (
                 <tr
                   key={trade.id}
-                  className="h-11 border-b border-[#1E2634] transition-colors hover:bg-[#171E2B]"
+                  data-highlighted-mistake={isHighlighted ? 'true' : undefined}
+                  className={
+                    isHighlighted
+                      ? 'h-11 border-b border-rose-500/40 bg-rose-500/15 ring-1 ring-inset ring-rose-400/60 transition-colors hover:bg-rose-500/20'
+                      : 'h-11 border-b border-[#1E2634] transition-colors hover:bg-[#171E2B]'
+                  }
                 >
                   <td className="px-3.5 py-2 font-mono text-slate-200 tabular-nums whitespace-nowrap">
-                    {formatDisplayDate(trade.date)}
+                    <span className="inline-flex items-center gap-1.5">
+                      <span>{formatDisplayDate(trade.date)}</span>
+                      {isHighlighted ? (
+                        <span className="rounded bg-rose-500/25 px-1.5 py-0.5 text-[10px] font-semibold text-rose-200 ring-1 ring-rose-400/40">
+                          Errore
+                        </span>
+                      ) : null}
+                    </span>
                   </td>
                   <td className="px-3.5 py-2 font-mono font-semibold text-slate-100 whitespace-nowrap">
                     {trade.asset}

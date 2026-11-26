@@ -6,6 +6,13 @@ export interface DisciplinePatternTag {
   count: number;
 }
 
+export interface LastMistakeInfo {
+  date: string;
+  category: 'live' | 'missed';
+  tradeIds: string[];
+  primaryTradeId: string;
+}
+
 export interface DisciplineMetrics {
   hasData: boolean;
   adherenceScore: number;
@@ -17,6 +24,7 @@ export interface DisciplineMetrics {
   noteDeviationsCount: number;
   behavioralMissedCount: number;
   detectedTags: DisciplinePatternTag[];
+  lastMistake: LastMistakeInfo | null;
 }
 
 export interface AiCoachAnalysisInput {
@@ -87,6 +95,7 @@ export function computeDisciplineMetrics(params: {
       noteDeviationsCount: 0,
       behavioralMissedCount: 0,
       detectedTags: [],
+      lastMistake: null,
     };
   }
 
@@ -96,7 +105,10 @@ export function computeDisciplineMetrics(params: {
   };
 
   interface EventEntry {
+    id: string;
     date: string;
+    entryTime: string;
+    category: 'live' | 'missed';
     isError: boolean;
     createdAt: number;
   }
@@ -111,7 +123,10 @@ export function computeDisciplineMetrics(params: {
     const hasDeviation = flags.length > 0;
     if (hasDeviation) noteDeviationsCount += 1;
     events.push({
+      id: tr.id,
       date: tr.date,
+      entryTime: tr.entryTime ?? '',
+      category: 'live',
       isError: hasDeviation,
       createdAt: tr.createdAt,
     });
@@ -133,15 +148,19 @@ export function computeDisciplineMetrics(params: {
     }
 
     events.push({
+      id: tr.id,
       date: tr.date,
+      entryTime: tr.entryTime ?? '',
+      category: 'missed',
       isError: !isMarketOnly,
       createdAt: tr.createdAt,
     });
   });
 
-  // Sort chronologically to compute consecutive clean days & recent mistake probability
+  // Sort chronologically to compute consecutive clean days, last mistake & recent mistake probability
   events.sort((a, b) => {
     if (a.date !== b.date) return a.date.localeCompare(b.date);
+    if (a.entryTime !== b.entryTime) return a.entryTime.localeCompare(b.entryTime);
     return a.createdAt - b.createdAt;
   });
 
@@ -161,6 +180,28 @@ export function computeDisciplineMetrics(params: {
       consecutiveCleanDays += 1;
     }
   }
+
+  const datedMistakes = events.filter(
+    (ev) => ev.isError && /^\d{4}-\d{2}-\d{2}$/.test(ev.date),
+  );
+  const allMistakes =
+    datedMistakes.length > 0 ? datedMistakes : events.filter((ev) => ev.isError);
+  const latestMistakeEvent =
+    allMistakes.length > 0 ? allMistakes[allMistakes.length - 1] : null;
+  const lastMistake: LastMistakeInfo | null = latestMistakeEvent
+    ? {
+        date: latestMistakeEvent.date,
+        category: latestMistakeEvent.category,
+        primaryTradeId: latestMistakeEvent.id,
+        tradeIds: allMistakes
+          .filter(
+            (ev) =>
+              ev.date === latestMistakeEvent.date &&
+              ev.category === latestMistakeEvent.category,
+          )
+          .map((ev) => ev.id),
+      }
+    : null;
 
   const unforcedErrorsCount = noteDeviationsCount + behavioralMissedCount;
   const overallErrorRate = unforcedErrorsCount / Math.max(1, totalEvents);
@@ -216,6 +257,7 @@ export function computeDisciplineMetrics(params: {
     noteDeviationsCount,
     behavioralMissedCount,
     detectedTags,
+    lastMistake,
   };
 }
 
