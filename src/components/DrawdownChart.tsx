@@ -1,6 +1,10 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { PerformanceStats, TradeRecord } from '../types/trading';
-import { formatDisplayDate, formatR } from '../utils/calculations';
+import {
+  calculateMaxDrawdownPeriod,
+  formatDisplayDate,
+  formatR,
+} from '../utils/calculations';
 
 interface DrawdownChartProps {
   subtitle: string;
@@ -25,6 +29,7 @@ export function DrawdownChart({
 
   const points = stats.equityPoints;
   const hasData = points.length > 1;
+  const ddPeriod = useMemo(() => calculateMaxDrawdownPeriod(points), [points]);
 
   const width = 960;
   const height = 220;
@@ -75,8 +80,26 @@ export function DrawdownChart({
           <p className="mt-0.5 text-xs text-slate-400">{subtitle}</p>
         </div>
 
-        <div className="rounded-md border border-rose-500/35 bg-rose-500/10 px-3 py-1.5 font-mono text-xs font-bold text-rose-400 tabular-nums">
-          Max Drawdown: -{stats.maxDrawdownR.toFixed(2)} R
+        <div className="flex flex-wrap items-center gap-2">
+          {ddPeriod ? (
+            <div
+              className="rounded-md border border-[#263042] bg-[#0B0E14] px-3 py-1.5 font-mono text-xs text-slate-300 tabular-nums"
+              title={
+                ddPeriod.isRecovered && ddPeriod.recoveryDate
+                  ? `Picco: ${formatDisplayDate(ddPeriod.peakDate)} → Minimo: ${formatDisplayDate(ddPeriod.troughDate)} → Recupero: ${formatDisplayDate(ddPeriod.recoveryDate)} (${ddPeriod.durationDays} gg)`
+                  : `Picco: ${formatDisplayDate(ddPeriod.peakDate)} → Minimo (Trough): ${formatDisplayDate(ddPeriod.troughDate)} (non ancora recuperato · ${ddPeriod.durationDays} gg)`
+              }
+            >
+              {formatDisplayDate(ddPeriod.startDate)} - {formatDisplayDate(ddPeriod.endDate)} •{' '}
+              <span className="font-semibold text-slate-100">
+                {ddPeriod.durationDays} gg
+              </span>
+            </div>
+          ) : null}
+
+          <div className="rounded-md border border-rose-500/35 bg-rose-500/10 px-3 py-1.5 font-mono text-xs font-bold text-rose-400 tabular-nums">
+            Max Drawdown: -{stats.maxDrawdownR.toFixed(2)} R
+          </div>
         </div>
       </div>
 

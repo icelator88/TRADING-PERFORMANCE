@@ -823,3 +823,124 @@ export function generateTradeId(prefix = 'tr'): string {
   }
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 }
+
+export interface MaxDrawdownPeriod {
+  peakDate: string;
+  troughDate: string;
+  recoveryDate: string | null;
+  startDate: string;
+  endDate: string;
+  durationDays: number;
+  isRecovered: boolean;
+}
+
+function parseIsoUtcMs(isoDate: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate);
+  if (!m) return null;
+  const ms = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+export function calculateMaxDrawdownPeriod(
+  equityPoints: PerformanceStats['equityPoints'],
+): MaxDrawdownPeriod | null {
+  if (equityPoints.length <= 1) return null;
+
+  let runningPeakR = equityPoints[0].cumulativeR;
+  let runningPeakIdx = 0;
+
+  let bestDd = 0;
+  let bestPeakIdx = 0;
+  let bestTroughIdx = -1;
+  let bestPeakR = 0;
+
+  for (let i = 1; i < equityPoints.length; i += 1) {
+    const pt = equityPoints[i];
+    const prev = equityPoints[i - 1];
+
+    if (pt.cumulativeR > runningPeakR) {
+      runningPeakR = pt.cumulativeR;
+      runningPeakIdx = i;
+    } else if (pt.cumulativeR === runningPeakR && prev.cumulativeR < runningPeakR) {
+      runningPeakIdx = i;
+    }
+
+    if (pt.drawdownR < bestDd) {
+      bestDd = pt.drawdownR;
+      bestPeakIdx = runningPeakIdx;
+      bestTroughIdx = i;
+      bestPeakR = runningPeakR;
+    }
+  }
+
+  if (bestTroughIdx === -1 || bestDd >= 0) return null;
+
+  const isIsoDate = (d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d);
+
+  let peakDate =
+    bestPeakIdx > 0 && isIsoDate(equityPoints[bestPeakIdx].date)
+      ? equityPoints[bestPeakIdx].date
+      : '';
+
+  if (!peakDate) {
+    for (let k = bestPeakIdx + 1; k <= bestTroughIdx; k += 1) {
+      if (isIsoDate(equityPoints[k].date) && equityPoints[k].drawdownR < 0) {
+        peakDate = equityPoints[k].date;
+        break;
+      }
+    }
+  }
+  if (!peakDate) {
+    for (let k = bestPeakIdx + 1; k <= bestTroughIdx; k += 1) {
+      if (isIsoDate(equityPoints[k].date)) {
+        peakDate = equityPoints[k].date;
+        break;
+      }
+    }
+  }
+
+  let troughDate = isIsoDate(equityPoints[bestTroughIdx].date)
+    ? equityPoints[bestTroughIdx].date
+    : '';
+  if (!troughDate) {
+    for (let k = bestTroughIdx; k > bestPeakIdx; k -= 1) {
+      if (isIsoDate(equityPoints[k].date)) {
+        troughDate = equityPoints[k].date;
+        break;
+      }
+    }
+  }
+
+  let recoveryDate: string | null = null;
+  for (let j = bestTroughIdx + 1; j < equityPoints.length; j += 1) {
+    const pt = equityPoints[j];
+    if (pt.cumulativeR >= bestPeakR || pt.drawdownR >= 0) {
+      if (isIsoDate(pt.date)) {
+        recoveryDate = pt.date;
+      }
+      break;
+    }
+  }
+
+  const startDate = peakDate;
+  const endDate = recoveryDate ?? troughDate;
+  if (!startDate || !endDate) return null;
+
+  const startMs = parseIsoUtcMs(startDate);
+  const endMs = parseIsoUtcMs(endDate);
+  const durationDays =
+    startMs !== null && endMs !== null
+      ? Math.max(0, Math.round((endMs - startMs) / 86_400_000))
+      : 0;
+
+  return {
+    peakDate,
+    troughDate: troughDate || endDate,
+    recoveryDate,
+    startDate,
+    endDate,
+    durationDays,
+    isRecovered: Boolean(recoveryDate),
+  };
+}
+
