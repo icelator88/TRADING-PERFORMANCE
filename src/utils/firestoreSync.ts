@@ -258,7 +258,10 @@ function buildTradePayload(
       ? trade.category
       : 'live';
   const safeBias = trade.bias === 'SHORT' ? 'SHORT' : 'LONG';
-  const safeOutcome = normalizeOutcome(trade.outcome);
+  const safeOutcome = normalizeOutcome(
+    trade.outcome,
+    typeof trade.netR === 'number' ? trade.netR : null,
+  );
   const safeRiskPct = clampNumber(roundTo(trade.riskPct, 2), 0, 100);
   const safeNetR = clampNumber(roundTo(trade.netR, 2), -1000, 10000);
   const safeNetReturnPct = clampNumber(
@@ -397,7 +400,10 @@ function docToTradeRecord(
     slPips: typeof data.slPips === 'number' ? data.slPips : null,
     tpPips: typeof data.tpPips === 'number' ? data.tpPips : null,
     targetRR: typeof data.targetRR === 'number' ? data.targetRR : null,
-    outcome: normalizeOutcome(String(data.outcome ?? 'BE')),
+    outcome: normalizeOutcome(
+      String(data.outcome ?? 'BE'),
+      typeof data.netR === 'number' ? data.netR : null,
+    ),
     netR: typeof data.netR === 'number' ? roundTo(data.netR, 2) : 0,
     rrMax: typeof data.rrMax === 'number' ? data.rrMax : null,
     netReturnPct: typeof data.netReturnPct === 'number' ? roundTo(data.netReturnPct, 2) : 0,

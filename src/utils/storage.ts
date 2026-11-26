@@ -71,10 +71,15 @@ function coerceLegacyTrade(
   const biasRaw = String(raw.bias ?? raw.direzione ?? raw.direction ?? 'LONG').toUpperCase();
   const bias = biasRaw === 'SHORT' ? 'SHORT' : 'LONG';
 
-  const outcome = normalizeOutcome(String(raw.outcome ?? raw.esito ?? 'BE'));
+  const rawOutcomeStr = String(raw.outcome ?? raw.esito ?? 'BE');
+  const rawNetRNum = Number(raw.netR ?? raw.r ?? raw.rMultiple);
+  const outcome = normalizeOutcome(
+    rawOutcomeStr,
+    Number.isFinite(rawNetRNum) ? rawNetRNum : null,
+  );
 
   // Support both our current schema (netR) and mechanical journal schema (rr + esito)
-  let netR = Number(raw.netR ?? raw.r ?? raw.rMultiple);
+  let netR = rawNetRNum;
   if (!Number.isFinite(netR)) {
     const rrNum = Number(raw.rr ?? 0);
     if (outcome === 'TP') netR = Math.abs(rrNum);

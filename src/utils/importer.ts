@@ -574,30 +574,63 @@ export function buildTradeDuplicateKey(
   return `${openTimestamp}|${exitTimeKey}|${symbol}|${setupStrategy}|${direction}|${outcomeKey}|${netRKey}|${returnPctKey}|${entryKey}|${slKey}|${tpKey}`;
 }
 
+function extractTableAssetTag(id: string | undefined): string {
+  if (!id) return '';
+  const m = /_t(\d+)_a(\d+)_/.exec(id);
+  if (m) return `t${m[1]}_a${m[2]}`;
+  return '';
+}
+
 export function deduplicateImportedTrades(
   existingTrades: TradeRecord[],
   incomingTrades: TradeRecord[],
   options?: { keyFn?: (trade: TradeRecord) => string },
 ): { addedTrades: TradeRecord[]; skippedDuplicates: number } {
   const getKey = options?.keyFn ?? buildTradeDuplicateKey;
-  const seenKeys = new Set<string>();
-  const seenIds = new Set<string>();
-  existingTrades.forEach((tr) => {
-    seenKeys.add(getKey(tr));
-    if (tr.id) seenIds.add(tr.id);
+  const incomingIds = new Set<string>();
+  incomingTrades.forEach((tr) => {
+    if (tr.id) incomingIds.add(tr.id);
   });
 
+  const existingKeyCounts = new Map<string, number>();
+  const existingIds = new Set<string>();
+  existingTrades.forEach((tr) => {
+    if (tr.id) existingIds.add(tr.id);
+    if (!tr.id || !incomingIds.has(tr.id)) {
+      const k = getKey(tr);
+      existingKeyCounts.set(k, (existingKeyCounts.get(k) ?? 0) + 1);
+    }
+  });
+
+  const seenBatchIds = new Set<string>();
+  const seenBatchKeysWithTable = new Set<string>();
   const addedTrades: TradeRecord[] = [];
   let skippedDuplicates = 0;
 
   incomingTrades.forEach((tr) => {
-    const key = getKey(tr);
-    if (seenKeys.has(key) || (tr.id && seenIds.has(tr.id))) {
+    if (tr.id && (existingIds.has(tr.id) || seenBatchIds.has(tr.id))) {
       skippedDuplicates += 1;
       return;
     }
-    seenKeys.add(key);
-    if (tr.id) seenIds.add(tr.id);
+
+    const key = getKey(tr);
+    const tableTag = extractTableAssetTag(tr.id);
+    const batchKey = tableTag ? `${key}|${tableTag}` : key;
+
+    if (seenBatchKeysWithTable.has(batchKey)) {
+      skippedDuplicates += 1;
+      return;
+    }
+
+    const remainingExisting = existingKeyCounts.get(key) ?? 0;
+    if (remainingExisting > 0) {
+      existingKeyCounts.set(key, remainingExisting - 1);
+      skippedDuplicates += 1;
+      return;
+    }
+
+    if (tr.id) seenBatchIds.add(tr.id);
+    seenBatchKeysWithTable.add(batchKey);
     addedTrades.push(tr);
   });
 
@@ -658,6 +691,8 @@ interface ResolvedColIndices {
   rrMax: number;
   rProg: number;
   link: number;
+  asset?: number;
+  setup?: number;
   maxMappedCol: number;
 }
 
@@ -752,6 +787,31 @@ function resolveHeaderColumns(row: unknown[]): {
       detected.link = idx;
       matchedNamedCount++;
       maxIdx = Math.max(maxIdx, idx);
+    } else if (
+      (label === 'ASSET' ||
+        label === 'COPPIA' ||
+        label === 'PAIR' ||
+        label === 'SIMBOLO' ||
+        label === 'SYMBOL' ||
+        label === 'TICKER' ||
+        label === 'STRUMENTO' ||
+        label === 'MERCATO' ||
+        label === 'MARKET') &&
+      detected.asset === undefined
+    ) {
+      detected.asset = idx;
+      matchedNamedCount++;
+      maxIdx = Math.max(maxIdx, idx);
+    } else if (
+      (label === 'SETUP' ||
+        label === 'STRATEGIA' ||
+        label === 'STRATEGY' ||
+        label === 'SCHEMATICA') &&
+      detected.setup === undefined
+    ) {
+      detected.setup = idx;
+      matchedNamedCount++;
+      maxIdx = Math.max(maxIdx, idx);
     }
   });
 
@@ -772,6 +832,8 @@ function resolveHeaderColumns(row: unknown[]): {
         rrMax: detected.rrMax ?? baseCol + 9,
         rProg: detected.rProg ?? baseCol + 10,
         link: detected.link ?? Math.max(maxIdx + 1, baseCol + 11),
+        asset: detected.asset,
+        setup: detected.setup,
         maxMappedCol: Math.max(maxIdx, baseCol + 11),
       },
     };
@@ -784,6 +846,70 @@ function resolveHeaderColumns(row: unknown[]): {
   return { isHeader: false, cols: null };
 }
 
+function normalizeDetectedAssetToken(rawCell: string): string | null {
+  const s = rawCell.replace(/\u00A0/g, ' ').trim().toUpperCase();
+  if (!s) return null;
+
+  const prefixed = /^(?:ASSET|COPPIA|PAIR|SIMBOLO|SYMBOL|STRUMENTO|MERCATO)\s*[:\-=]\s*(.+)$/.exec(
+    s,
+  );
+  const candidate = (prefixed ? prefixed[1] : s).trim();
+  if (!candidate || candidate.length > 24) return null;
+
+  const slashPair = /^([A-Z]{3})\s*\/\s*([A-Z]{3})$/.exec(candidate);
+  if (slashPair && slashPair[1] !== slashPair[2]) {
+    return `${slashPair[1]}/${slashPair[2]}`;
+  }
+
+  const compactPair = /^(EUR|GBP|USD|CHF|JPY|AUD|NZD|CAD)(EUR|GBP|USD|CHF|JPY|AUD|NZD|CAD)$/.exec(
+    candidate.replace(/[^A-Z]/g, ''),
+  );
+  if (compactPair && compactPair[1] !== compactPair[2]) {
+    return `${compactPair[1]}/${compactPair[2]}`;
+  }
+
+  if (/^(XAU\s*\/?\s*USD|GOLD)$/.test(candidate)) return 'XAU/USD';
+  if (/^(XAG\s*\/?\s*USD|SILVER)$/.test(candidate)) return 'XAG/USD';
+  if (/^(BTC\s*\/?\s*USD)$/.test(candidate)) return 'BTC/USD';
+  if (/^(ETH\s*\/?\s*USD)$/.test(candidate)) return 'ETH/USD';
+  if (/^(SOL\s*\/?\s*USD)$/.test(candidate)) return 'SOL/USD';
+  if (/^(US30|NAS100|NASDAQ|NDX|SPX500|SPX|US500|DAX|DE40|GER40|UK100)$/.test(candidate)) {
+    return candidate === 'US500' ? 'SPX500' : candidate;
+  }
+
+  if (prefixed && /^[A-Z0-9/._-]{2,20}$/.test(candidate)) {
+    return candidate;
+  }
+
+  return null;
+}
+
+function detectSectionTitleInfo(row: unknown[]): {
+  asset: string | null;
+  strategy: string | null;
+} {
+  const nonEmpty = row
+    .map((cell) => String(cell ?? '').replace(/\u00A0/g, ' ').trim())
+    .filter(Boolean);
+  if (nonEmpty.length === 0 || nonEmpty.length > 4) {
+    return { asset: null, strategy: null };
+  }
+
+  let foundAsset: string | null = null;
+  let foundStrategy: string | null = null;
+
+  for (const cell of nonEmpty) {
+    if (!foundAsset) {
+      foundAsset = normalizeDetectedAssetToken(cell);
+    }
+    if (!foundStrategy) {
+      foundStrategy = matchKnownSheetStrategy(cell);
+    }
+  }
+
+  return { asset: foundAsset, strategy: foundStrategy };
+}
+
 function isHttpUrl(val: string): boolean {
   return /^https?:\/\/\S+/i.test(val.trim());
 }
@@ -791,7 +917,7 @@ function isHttpUrl(val: string): boolean {
 /**
  * Header-aware + stacked-block parser supporting both:
  * 1) Exact named columns (DATA, GIORNO, SESSIONE, ORARIO, BIAS, OVER NIGHT, NOTE, ESITO, # R, RR MAX, R PROGRESS, plus URL/Link on the right)
- * 2) Classic stacked "Colonna 1" 12-column Excel blocks
+ * 2) Classic stacked "Colonna 1" 12-column Excel blocks and multi-asset tables
  */
 function rowsMatrixToParsedSheet(
   sheetName: string,
@@ -807,6 +933,10 @@ function rowsMatrixToParsedSheet(
   const blockCounts: number[] = [];
   const parsedRows: Record<string, string>[] = [];
   let activeCols: ResolvedColIndices = DEFAULT_COL_INDICES;
+  let currentSectionAsset: string | null = null;
+  let currentSectionStrategy: string | null = null;
+  const assetTableOrder = new Map<string, number>();
+  let hasPerRowAsset = false;
 
   for (let r = 0; r < matrix.length; r++) {
     const row = Array.isArray(matrix[r]) ? matrix[r] : [];
@@ -825,6 +955,18 @@ function rowsMatrixToParsedSheet(
     const c0Str = String(c0Raw ?? '').trim();
     const c0Upper = c0Str.toUpperCase();
     if (c0Upper.includes('DATA') || c0Upper.includes('COLONNA')) {
+      continue;
+    }
+
+    // Check if this non-trade row declares an Asset/Strategy section title before a table
+    if (!normalizeImportDate(c0Raw)) {
+      const sectionInfo = detectSectionTitleInfo(row);
+      if (sectionInfo.asset) {
+        currentSectionAsset = sectionInfo.asset;
+      }
+      if (sectionInfo.strategy) {
+        currentSectionStrategy = sectionInfo.strategy;
+      }
       continue;
     }
 
@@ -848,12 +990,36 @@ function rowsMatrixToParsedSheet(
       STACKED_BLOCK_SETUPS[effectiveBlockIndex] ??
       STACKED_BLOCK_SETUPS[STACKED_BLOCK_SETUPS.length - 1];
 
-    // If the sheet tab is named after a known strategy AND has only 1 block (blockIndex <= 0),
-    // use the normalized sheet strategy; otherwise map by blockIndex (0..4).
-    const assignedStrategy =
-      knownSheetStrategy && effectiveBlockIndex === 0
-        ? knownSheetStrategy
-        : stackedStrategy;
+    const colSetupRaw =
+      activeCols.setup !== undefined
+        ? String(row[activeCols.setup] ?? '').trim()
+        : '';
+
+    // Precedence: explicit setup column > section title strategy > known sheet tab > stacked block strategy
+    const assignedStrategy = colSetupRaw
+      ? normalizeSetupName(colSetupRaw)
+      : currentSectionStrategy
+        ? currentSectionStrategy
+        : knownSheetStrategy && effectiveBlockIndex === 0
+          ? knownSheetStrategy
+          : stackedStrategy;
+
+    const colAssetRaw =
+      activeCols.asset !== undefined
+        ? String(row[activeCols.asset] ?? '').trim().toUpperCase()
+        : '';
+    const resolvedRowAsset = colAssetRaw || currentSectionAsset || '';
+    if (resolvedRowAsset) {
+      hasPerRowAsset = true;
+    }
+
+    const tableIndex = effectiveBlockIndex + 1;
+    const assetOrderKey = `${tableIndex}|${resolvedRowAsset || 'DEFAULT'}`;
+    let assetIndex = assetTableOrder.get(assetOrderKey);
+    if (assetIndex === undefined) {
+      assetIndex = assetTableOrder.size + 1;
+      assetTableOrder.set(assetOrderKey, assetIndex);
+    }
 
     const embeddedTime = extractEmbeddedTime(c0Raw);
     const parsedTime = formatExcelTimeCell(row[activeCols.time]) || embeddedTime;
@@ -901,6 +1067,9 @@ function rowsMatrixToParsedSheet(
       LINK: resolvedLink,
       __blockSetup: assignedStrategy,
       __rowIndex: String(r + 1),
+      __tableIndex: String(tableIndex),
+      __assetIndex: String(assetIndex),
+      ...(resolvedRowAsset ? { ASSET: resolvedRowAsset, __rowAsset: resolvedRowAsset } : {}),
     };
 
     blockCounts[effectiveBlockIndex] = (blockCounts[effectiveBlockIndex] ?? 0) + 1;
@@ -908,10 +1077,13 @@ function rowsMatrixToParsedSheet(
   }
 
   const detectedFiveBlocks = blockCounts.length >= 2;
+  const headers = hasPerRowAsset
+    ? [...STRICT_HEADERS, 'ASSET']
+    : [...STRICT_HEADERS];
 
   return {
     sheetName: sheetName.trim(),
-    headers: [...STRICT_HEADERS],
+    headers,
     rows: parsedRows,
     detectedFiveBlocks,
     blockCounts,
@@ -1090,7 +1262,14 @@ export function autoDetectColumnMapping(headers: string[]): Record<string, Mappi
   ];
 
   headers.forEach((h, idx) => {
-    mapping[h] = strictPositional[idx] ?? 'ignore';
+    const upper = h.trim().toUpperCase();
+    if (upper === 'ASSET') {
+      mapping[h] = 'asset';
+    } else if (upper === 'SETUP') {
+      mapping[h] = 'setup';
+    } else {
+      mapping[h] = strictPositional[idx] ?? 'ignore';
+    }
   });
 
   return mapping;
@@ -1099,12 +1278,56 @@ export function autoDetectColumnMapping(headers: string[]): Record<string, Mappi
 export interface BuildTradeIdContext {
   asset: string;
   sheetName: string;
+  tableIndex: number;
+  assetIndex: number;
   rowIndex: number;
   date: string;
   entryTime: string;
   outcome: OutcomeType;
+  setup: string;
   idx: number;
   category: TradeCategory;
+}
+
+function sanitizeTradeIdSegment(raw: string, fallback: string): string {
+  const cleaned = String(raw ?? '')
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return cleaned || fallback;
+}
+
+function hashTradeIdSuffix(input: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36).padStart(6, '0').slice(0, 6);
+}
+
+/**
+ * Deterministic Firestore-safe unique ID for CSV/Excel imported trades.
+ * Includes the table/asset index (`t{tableIndex}_a{assetIndex}`) so identical
+ * timestamps across different asset tables in the same file never collide.
+ */
+export function buildImportedTradeId(ctx: BuildTradeIdContext): string {
+  const prefix =
+    ctx.category === 'missed' ? 'mi' : ctx.category === 'backtest' ? 'bt' : 'li';
+  const safeAsset = sanitizeTradeIdSegment(ctx.asset.toUpperCase(), 'ASSET');
+  const safeSetup = sanitizeTradeIdSegment(ctx.setup.toUpperCase(), 'S1');
+  const safeDate = sanitizeTradeIdSegment(ctx.date, 'NODATE');
+  const safeTime = sanitizeTradeIdSegment(ctx.entryTime || '00-00', '00-00');
+  const safeOutcome = sanitizeTradeIdSegment(ctx.outcome.toUpperCase(), 'OUTCOME');
+
+  const fullId = `${prefix}_${safeAsset}_${safeSetup}_t${ctx.tableIndex}_a${ctx.assetIndex}_r${ctx.rowIndex}_${safeDate}_${safeTime}_${safeOutcome}`;
+  if (fullId.length <= 128) return fullId;
+
+  const suffix = hashTradeIdSuffix(fullId);
+  return `${prefix}_${safeAsset.slice(0, 20)}_t${ctx.tableIndex}_a${ctx.assetIndex}_r${ctx.rowIndex}_${safeDate}_${safeTime}_${suffix}`.slice(
+    0,
+    128,
+  );
 }
 
 export function buildTradesFromSheet(
@@ -1113,11 +1336,15 @@ export function buildTradesFromSheet(
   targetCategory: TradeCategory,
   setupOverride: string,
   defaultAsset = 'CHF/JPY',
-  options?: { idBuilder?: (ctx: BuildTradeIdContext) => string },
+  options?: {
+    idBuilder?: (ctx: BuildTradeIdContext) => string;
+    tableIndexOffset?: number;
+  },
 ): TradeRecord[] {
   const trades: TradeRecord[] = [];
   const now = Date.now();
   const fallbackAsset = defaultAsset.trim().toUpperCase() || 'CHF/JPY';
+  const tableIndexOffset = options?.tableIndexOffset ?? 0;
 
   sheet.rows.forEach((rawRow, idx) => {
     const fieldValues: Partial<Record<MappingField, string>> = {};
@@ -1137,12 +1364,14 @@ export function buildTradesFromSheet(
     const esitoStr = String(fieldValues.outcome ?? rawRow.ESITO ?? '').trim();
     if (!parsedDate || !esitoStr) return;
 
-    const asset = (fieldValues.asset ?? '').trim().toUpperCase() || fallbackAsset;
+    const asset =
+      (fieldValues.asset ?? rawRow.__rowAsset ?? '').trim().toUpperCase() ||
+      fallbackAsset;
 
     const netRParsed = parseNumericRCell(fieldValues.netR ?? rawRow.R);
     const rrMaxParsed = parseNumericRCell(fieldValues.rrMax ?? rawRow['RR MAX']);
 
-    const outcome = normalizeOutcome(esitoStr);
+    const outcome = normalizeOutcome(esitoStr, netRParsed);
     const biasRaw = String(fieldValues.bias ?? rawRow.BIAS ?? '')
       .trim()
       .toUpperCase();
@@ -1178,18 +1407,28 @@ export function buildTradesFromSheet(
         : undefined;
 
     const rowIndex = Number.parseInt(rawRow.__rowIndex ?? '', 10) || idx + 1;
+    const rawTableIndex = Number.parseInt(rawRow.__tableIndex ?? '', 10) || 1;
+    const rawAssetIndex = Number.parseInt(rawRow.__assetIndex ?? '', 10) || rawTableIndex;
+    const tableIndex = rawTableIndex + tableIndexOffset;
+    const assetIndex = rawAssetIndex + tableIndexOffset;
+
+    const idContext: BuildTradeIdContext = {
+      asset,
+      sheetName: sheet.sheetName,
+      tableIndex,
+      assetIndex,
+      rowIndex,
+      date: parsedDate,
+      entryTime: normEntryTime || '',
+      outcome,
+      setup,
+      idx,
+      category: finalCategory,
+    };
+
     const tradeId = options?.idBuilder
-      ? options.idBuilder({
-          asset,
-          sheetName: sheet.sheetName,
-          rowIndex,
-          date: parsedDate,
-          entryTime: normEntryTime || '',
-          outcome,
-          idx,
-          category: finalCategory,
-        })
-      : generateTradeId(finalCategory.slice(0, 2));
+      ? options.idBuilder(idContext)
+      : buildImportedTradeId(idContext);
 
     const base: TradeRecord = {
       id: tradeId,
@@ -1349,13 +1588,13 @@ function normalizeRestoredTrade(
   const setup = normalizeSetupName(String(raw.setup ?? raw.strategy ?? 'S1'));
   const biasRaw = String(raw.bias ?? raw.direction ?? 'LONG').toUpperCase();
   const bias = biasRaw === 'SHORT' ? 'SHORT' : 'LONG';
-  const outcome = normalizeOutcome(String(raw.outcome ?? 'BE'));
   const toFiniteOrNull = (val: unknown): number | null => {
     if (val === null || val === undefined || val === '') return null;
     const n = typeof val === 'number' ? val : Number(String(val).replace(',', '.').trim());
     return Number.isFinite(n) ? n : null;
   };
   const netRNum = toFiniteOrNull(raw.netR ?? raw.rMultiple ?? raw.pnl ?? raw.result) ?? 0;
+  const outcome = normalizeOutcome(String(raw.outcome ?? 'BE'), netRNum);
   const riskNum = toFiniteOrNull(raw.riskPct) ?? 1;
   const netR = roundTo(netRNum, 2);
   const riskPct = riskNum >= 0 ? riskNum : 1;

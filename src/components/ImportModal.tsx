@@ -114,18 +114,20 @@ export function ImportModal({
     selectedSheetIdx === -1 ? sheets : activeSheet ? [activeSheet] : [];
 
   const allCandidateTrades: TradeRecord[] = [];
+  let tableOffset = 0;
   sheetsToProcess.forEach((sheet) => {
     const sheetMapping =
       sheet === activeSheet ? mapping : autoDetectColumnMapping(sheet.headers);
-    allCandidateTrades.push(
-      ...buildTradesFromSheet(
-        sheet,
-        sheetMapping,
-        targetCategory,
-        setupOverride,
-        importAsset,
-      ),
+    const sheetTrades = buildTradesFromSheet(
+      sheet,
+      sheetMapping,
+      targetCategory,
+      setupOverride,
+      importAsset,
+      { tableIndexOffset: tableOffset },
     );
+    tableOffset += Math.max(1, sheet.blockCounts.length);
+    allCandidateTrades.push(...sheetTrades);
   });
 
   const { addedTrades: dedupedNewTrades, skippedDuplicates } =

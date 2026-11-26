@@ -123,9 +123,18 @@ export function runRowCalculationEngine(trade: TradeRecord): TradeRecord {
   };
 }
 
-export function normalizeOutcome(raw: string | undefined | null): OutcomeType {
+export function normalizeOutcome(
+  raw: string | undefined | null,
+  netR?: number | null,
+): OutcomeType {
   const s = String(raw ?? '').trim().toUpperCase();
-  if (!s) return 'BE';
+  const hasNetR = typeof netR === 'number' && Number.isFinite(netR);
+
+  if (!s) {
+    if (hasNetR && netR > 0) return 'TP';
+    if (hasNetR && netR < 0) return 'STOP LOSS';
+    return 'BE';
+  }
   if (
     s === 'UF' ||
     s === 'U.F.' ||
@@ -138,7 +147,34 @@ export function normalizeOutcome(raw: string | undefined | null): OutcomeType {
   ) {
     return 'UNFILLED';
   }
-  if (s === 'TP' || s.startsWith('TP') || s === 'WIN' || s === 'W' || s === 'PROFIT' || s === 'TAKE PROFIT' || s === 'TARGET') {
+  if (
+    s.includes('CHIUSURA MANUAL') ||
+    s.includes('CHIUSO MANUAL') ||
+    s.includes('MANUAL CLOSE') ||
+    s.includes('MANUALE')
+  ) {
+    if (hasNetR) {
+      if (netR > 0) return 'TP';
+      if (netR < 0) return 'STOP LOSS';
+      return 'BE';
+    }
+    if (s.includes('WIN') || s.includes('PROFIT') || s.includes('TP') || s.includes('POSITIV')) {
+      return 'TP';
+    }
+    if (s.includes('LOSS') || s.includes('SL') || s.includes('NEGATIV')) {
+      return 'STOP LOSS';
+    }
+    return 'BE';
+  }
+  if (
+    s === 'TP' ||
+    s.startsWith('TP') ||
+    s === 'WIN' ||
+    s === 'W' ||
+    s === 'PROFIT' ||
+    s === 'TAKE PROFIT' ||
+    s === 'TARGET'
+  ) {
     return 'TP';
   }
   if (s.includes('STOP') || s === 'SL' || s === 'LOSS' || s === 'L') {
