@@ -19,6 +19,7 @@ export const KEYS = {
   MISSED: 'diariotrade_missed_v1',
   MECCANICO_LEGACY: 'diariotrade_meccanico_v1',
   LANGUAGE: 'diariotrade_language_v1',
+  ACTIVE_PORTFOLIO_ASSETS: 'diariotrade_active_portfolio_assets_v1',
 } as const;
 
 interface DiscoveredStorage {
@@ -374,6 +375,45 @@ export function saveLanguagePreference(lang: Language): void {
     if (discovered.langKey && discovered.langKey !== KEYS.LANGUAGE) {
       localStorage.setItem(discovered.langKey, lang);
     }
+  } catch {
+    // ignore
+  }
+}
+
+export function loadActivePortfolioAssetsPreference(): string[] | null {
+  try {
+    const raw = localStorage.getItem(KEYS.ACTIVE_PORTFOLIO_ASSETS);
+    if (!raw || raw === 'null') return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    return Array.from(
+      new Set(
+        parsed
+          .filter((item): item is string => typeof item === 'string')
+          .map((item) => item.trim().toUpperCase().slice(0, 32))
+          .filter(Boolean),
+      ),
+    ).sort();
+  } catch {
+    return null;
+  }
+}
+
+export function saveActivePortfolioAssetsPreference(assets: string[] | null): void {
+  try {
+    if (assets === null) {
+      localStorage.removeItem(KEYS.ACTIVE_PORTFOLIO_ASSETS);
+      return;
+    }
+    const clean = Array.from(
+      new Set(
+        assets
+          .filter((item): item is string => typeof item === 'string')
+          .map((item) => item.trim().toUpperCase().slice(0, 32))
+          .filter(Boolean),
+      ),
+    ).sort();
+    localStorage.setItem(KEYS.ACTIVE_PORTFOLIO_ASSETS, JSON.stringify(clean));
   } catch {
     // ignore
   }

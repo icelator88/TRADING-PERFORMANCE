@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowDownRight,
+  ArrowUpRight,
   Check,
+  ChevronDown,
+  ChevronRight,
   Cloud,
   Download,
   Eraser,
@@ -90,7 +94,9 @@ import {
   parseBackupJsonContent,
 } from './utils/importer';
 import {
+  loadActivePortfolioAssetsPreference,
   loadLanguagePreference,
+  saveActivePortfolioAssetsPreference,
   saveLanguagePreference,
 } from './utils/storage';
 
@@ -100,8 +106,9 @@ export function App() {
   const [selectedSetup, setSelectedSetup] = useState<string>('ALL');
   const [assetFilter, setAssetFilter] = useState<string>('ALL');
   const [activePortfolioAssets, setActivePortfolioAssets] = useState<string[] | null>(
-    null,
+    () => loadActivePortfolioAssetsPreference(),
   );
+  const [panchinaExpanded, setPanchinaExpanded] = useState(false);
   const [portfolioFilterMode, setPortfolioFilterMode] = useState<
     'active_only' | 'all'
   >('active_only');
@@ -253,18 +260,21 @@ export function App() {
     }
     const nextList = Array.from(currentSet).sort();
     setActivePortfolioAssets(nextList);
+    saveActivePortfolioAssetsPreference(nextList);
     syncSettingsPatch({ activePortfolioAssets: nextList });
   };
 
   const handleSelectAllPortfolioAssets = () => {
     setPortfolioFilterMode('active_only');
     setActivePortfolioAssets(null);
+    saveActivePortfolioAssetsPreference(null);
     syncSettingsPatch({ activePortfolioAssets: null });
   };
 
   const handleClearPortfolioAssets = () => {
     setPortfolioFilterMode('active_only');
     setActivePortfolioAssets([]);
+    saveActivePortfolioAssetsPreference([]);
     syncSettingsPatch({ activePortfolioAssets: [] });
   };
 
@@ -320,6 +330,7 @@ export function App() {
         const nextPortfolio = Array.from(portfolioSet).sort().slice(0, 100);
         patch.activePortfolioAssets = nextPortfolio;
         setActivePortfolioAssets(nextPortfolio);
+        saveActivePortfolioAssetsPreference(nextPortfolio);
       }
     }
 
@@ -470,7 +481,9 @@ export function App() {
           setActiveTab(cloudSettings.activeTab);
           setSelectedSetup(cloudSettings.selectedSetup);
           setAssetFilter(cloudSettings.assetFilter);
-          setActivePortfolioAssets(cloudSettings.activePortfolioAssets ?? null);
+          const syncedPortfolio = cloudSettings.activePortfolioAssets ?? null;
+          setActivePortfolioAssets(syncedPortfolio);
+          saveActivePortfolioAssetsPreference(syncedPortfolio);
           setCustomAssets(cloudSettings.customAssets ?? []);
         },
         (err) => {
@@ -646,6 +659,16 @@ export function App() {
           : activePortfolioAssets.map((a) => a.trim().toUpperCase()),
       ),
     [activePortfolioAssets, backtestPortfolioAssets],
+  );
+
+  const titolariAssets = useMemo(
+    () => backtestPortfolioAssets.filter((a) => activePortfolioAssetSet.has(a)),
+    [backtestPortfolioAssets, activePortfolioAssetSet],
+  );
+
+  const panchinaAssets = useMemo(
+    () => backtestPortfolioAssets.filter((a) => !activePortfolioAssetSet.has(a)),
+    [backtestPortfolioAssets, activePortfolioAssetSet],
   );
 
   const dashboardPortfolioBacktest = useMemo(() => {
@@ -2100,7 +2123,7 @@ export function App() {
           </div>
         </div>
 
-        {/* Shared Multi-Select Active Portfolio Assets Bar across Dashboard, Backtest, and Journal Reale (Persisted in Firebase; Trade Non Presi excluded) */}
+        {/* Shared Multi-Select Active Portfolio Assets Bar across Dashboard, Backtest, and Journal Reale (Persisted in Firestore & localStorage; Trade Non Presi excluded) */}
         {(activeTab === 'dashboard' ||
           activeTab === 'backtest' ||
           activeTab === 'live') &&
@@ -2117,11 +2140,7 @@ export function App() {
                 <span className="rounded border border-[#263042] bg-[#0B0E14] px-2 py-0.5 font-mono text-[11px] text-sky-300 tabular-nums">
                   {portfolioFilterMode === 'all'
                     ? `${backtestPortfolioAssets.length}/${backtestPortfolioAssets.length}`
-                    : `${
-                        backtestPortfolioAssets.filter((a) =>
-                          activePortfolioAssetSet.has(a),
-                        ).length
-                      }/${backtestPortfolioAssets.length}`}
+                    : `${titolariAssets.length}/${backtestPortfolioAssets.length}`}
                 </span>
 
                 <div
@@ -2160,56 +2179,173 @@ export function App() {
                   onClick={handleSelectAllPortfolioAssets}
                   className="rounded border border-[#263042] bg-[#0B0E14] px-2.5 py-1 font-medium text-slate-300 transition-colors hover:border-sky-500/50 hover:text-white"
                 >
-                  {lang === 'en' ? 'Select all' : 'Seleziona tutti'}
+                  {lang === 'en' ? 'All to Titolari' : 'Tutti in Titolari'}
                 </button>
                 <button
                   type="button"
                   onClick={handleClearPortfolioAssets}
                   className="rounded border border-[#263042] bg-[#0B0E14] px-2.5 py-1 font-medium text-slate-400 transition-colors hover:border-rose-500/40 hover:text-rose-300"
                 >
-                  {lang === 'en' ? 'Clear' : 'Deseleziona tutti'}
+                  {lang === 'en' ? 'Bench all' : 'Tutti in Panchina'}
                 </button>
               </div>
             </div>
 
-            <div className="mt-2.5 flex flex-wrap items-center gap-2">
-              {backtestPortfolioAssets.map((asset) => {
-                const isSelected = activePortfolioAssetSet.has(asset);
-                const visualChecked = portfolioFilterMode === 'all' ? true : isSelected;
-                return (
-                  <button
-                    key={asset}
-                    type="button"
-                    role="checkbox"
-                    aria-checked={isSelected}
-                    onClick={() =>
-                      handleTogglePortfolioAsset(asset, backtestPortfolioAssets)
-                    }
-                    className={`inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 font-mono text-xs font-medium transition-colors whitespace-nowrap ${
-                      portfolioFilterMode === 'all'
-                        ? isSelected
+            {/* Group 1: Titolari (always visible, checked/included by default) */}
+            <div className="mt-3">
+              <div className="mb-2 flex items-center gap-2">
+                <span className="text-[11px] font-semibold tracking-wide text-emerald-300 uppercase">
+                  Titolari
+                </span>
+                <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-300 tabular-nums">
+                  {titolariAssets.length}
+                </span>
+                {portfolioFilterMode === 'all' ? (
+                  <span className="text-[11px] text-emerald-400/80">
+                    (inclusi nei calcoli · modalità Tutti attiva)
+                  </span>
+                ) : null}
+              </div>
+
+              {titolariAssets.length === 0 ? (
+                <div className="rounded-md border border-dashed border-[#263042] bg-[#0B0E14]/60 px-3 py-2 text-xs text-slate-400">
+                  Nessun asset nei Titolari. Apri "Panchina" qui sotto per promuovere almeno un asset.
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center gap-2">
+                  {titolariAssets.map((asset) => (
+                    <div
+                      key={asset}
+                      className={`inline-flex items-center overflow-hidden rounded-md border font-mono text-xs font-medium transition-colors whitespace-nowrap ${
+                        portfolioFilterMode === 'all'
                           ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-200'
-                          : 'border-[#263042] bg-[#0B0E14] text-slate-300 hover:border-sky-500/50'
-                        : isSelected
-                          ? 'border-sky-500/60 bg-sky-500/15 text-sky-200'
-                          : 'border-[#1E2634] bg-[#0B0E14] text-slate-400 hover:border-slate-600 hover:text-slate-200'
-                    }`}
-                  >
-                    <span
-                      className={`flex h-3.5 w-3.5 items-center justify-center rounded-xs border ${
-                        visualChecked
-                          ? portfolioFilterMode === 'all' && !isSelected
-                            ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-300'
-                            : 'border-sky-400 bg-sky-500 text-[#0B0E14]'
-                          : 'border-slate-600 bg-transparent'
+                          : 'border-sky-500/60 bg-sky-500/15 text-sky-200'
                       }`}
                     >
-                      {visualChecked ? <Check className="h-2.5 w-2.5 stroke-[3]" /> : null}
-                    </span>
-                    <span>{asset}</span>
-                  </button>
-                );
-              })}
+                      <button
+                        type="button"
+                        role="checkbox"
+                        aria-checked={true}
+                        onClick={() =>
+                          handleTogglePortfolioAsset(asset, backtestPortfolioAssets)
+                        }
+                        className="inline-flex items-center gap-2 px-2.5 py-1.5 transition-colors hover:bg-white/5"
+                      >
+                        <span className="flex h-3.5 w-3.5 items-center justify-center rounded-xs border border-sky-400 bg-sky-500 text-[#0B0E14]">
+                          <Check className="h-2.5 w-2.5 stroke-[3]" />
+                        </span>
+                        <span>{asset}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleTogglePortfolioAsset(asset, backtestPortfolioAssets)
+                        }
+                        title={`Sposta ${asset} in Panchina`}
+                        aria-label={`Sposta ${asset} in Panchina`}
+                        className="inline-flex items-center gap-1 border-l border-sky-500/30 bg-[#0B0E14]/50 px-2 py-1.5 text-[10px] font-sans font-semibold text-slate-300 transition-colors hover:bg-amber-500/20 hover:text-amber-200"
+                      >
+                        <ArrowDownRight className="h-3 w-3" />
+                        <span>Panchina</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Group 2: Panchina (collapsible accordion hidden by default, containing benched/excluded assets) */}
+            <div className="mt-3 border-t border-[#1E2634] pt-2.5">
+              <button
+                type="button"
+                aria-expanded={panchinaExpanded}
+                onClick={() => setPanchinaExpanded((prev) => !prev)}
+                className="inline-flex items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-[#0B0E14]"
+              >
+                {panchinaExpanded ? (
+                  <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+                ) : (
+                  <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
+                )}
+                <span className="text-[11px] font-semibold tracking-wide text-slate-400 uppercase">
+                  Panchina
+                </span>
+                <span
+                  className={`rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold tabular-nums ${
+                    panchinaAssets.length > 0
+                      ? 'border-amber-500/35 bg-amber-500/10 text-amber-300'
+                      : 'border-[#263042] bg-[#0B0E14] text-slate-500'
+                  }`}
+                >
+                  {panchinaAssets.length}
+                </span>
+                {portfolioFilterMode === 'all' && panchinaAssets.length > 0 ? (
+                  <span className="text-[11px] text-emerald-400/80">
+                    (inclusi temporaneamente in modalità Tutti)
+                  </span>
+                ) : null}
+              </button>
+
+              {panchinaExpanded ? (
+                <div className="mt-2">
+                  {panchinaAssets.length === 0 ? (
+                    <div className="rounded-md border border-dashed border-[#263042] bg-[#0B0E14]/50 px-3 py-2 text-xs text-slate-500">
+                      Nessun asset in panchina. Usa il pulsante &quot;Panchina&quot; su qualsiasi Titolare per metterlo in panchina.
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-2">
+                      {panchinaAssets.map((asset) => {
+                        const visualChecked = portfolioFilterMode === 'all';
+                        return (
+                          <div
+                            key={asset}
+                            className={`inline-flex items-center overflow-hidden rounded-md border font-mono text-xs font-medium transition-colors whitespace-nowrap ${
+                              visualChecked
+                                ? 'border-emerald-500/40 bg-emerald-500/5 text-slate-300'
+                                : 'border-[#1E2634] bg-[#0B0E14] text-slate-400'
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              role="checkbox"
+                              aria-checked={false}
+                              onClick={() =>
+                                handleTogglePortfolioAsset(asset, backtestPortfolioAssets)
+                              }
+                              className="inline-flex items-center gap-2 px-2.5 py-1.5 transition-colors hover:bg-white/5 hover:text-slate-200"
+                            >
+                              <span
+                                className={`flex h-3.5 w-3.5 items-center justify-center rounded-xs border ${
+                                  visualChecked
+                                    ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-300'
+                                    : 'border-slate-600 bg-transparent'
+                                }`}
+                              >
+                                {visualChecked ? (
+                                  <Check className="h-2.5 w-2.5 stroke-[3]" />
+                                ) : null}
+                              </span>
+                              <span>{asset}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleTogglePortfolioAsset(asset, backtestPortfolioAssets)
+                              }
+                              title={`Promuovi ${asset} nei Titolari`}
+                              aria-label={`Promuovi ${asset} nei Titolari`}
+                              className="inline-flex items-center gap-1 border-l border-[#263042] bg-[#121721] px-2 py-1.5 text-[10px] font-sans font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/20 hover:text-emerald-200"
+                            >
+                              <ArrowUpRight className="h-3 w-3" />
+                              <span>Titolare</span>
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              ) : null}
             </div>
           </section>
         ) : null}
@@ -2496,7 +2632,15 @@ export function App() {
                   </div>
                   <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
                     {dashboardBacktestStats.totalTrades} trades ·{' '}
-                    {dashboardBacktestStats.winRatePct.toFixed(1)}% WR
+                    {dashboardBacktestStats.winRatePct.toFixed(1)}% WR ·{' '}
+                    <span>
+                      {lang === 'en' ? 'Avg R:R' : 'RR Medio'}:{' '}
+                      <span className="font-semibold text-slate-200">
+                        {dashboardBacktestStats.payoffRatio === null
+                          ? 'Max'
+                          : `${dashboardBacktestStats.payoffRatio.toFixed(2)} : 1`}
+                      </span>
+                    </span>
                   </div>
                   <div className="mt-1 font-mono text-[11px] text-slate-500 tabular-nums">
                     {dashboardBacktestStats.wins} TP · {dashboardBacktestStats.losses} SL ·{' '}
@@ -2516,7 +2660,16 @@ export function App() {
                     {formatR(dashboardLiveStats.netR)}
                   </div>
                   <div className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
-                    {dashboardLiveStats.totalTrades} trades · {dashboardLiveStats.winRatePct.toFixed(1)}% WR
+                    {dashboardLiveStats.totalTrades} trades ·{' '}
+                    {dashboardLiveStats.winRatePct.toFixed(1)}% WR ·{' '}
+                    <span>
+                      {lang === 'en' ? 'Avg R:R' : 'RR Medio'}:{' '}
+                      <span className="font-semibold text-slate-200">
+                        {dashboardLiveStats.payoffRatio === null
+                          ? 'Max'
+                          : `${dashboardLiveStats.payoffRatio.toFixed(2)} : 1`}
+                      </span>
+                    </span>
                   </div>
                   <div className="mt-1 font-mono text-[11px] text-slate-500 tabular-nums">
                     {dashboardLiveStats.wins} TP · {dashboardLiveStats.losses} SL ·{' '}
@@ -2539,6 +2692,49 @@ export function App() {
                     {t.dashboard.liveSeries}: {formatR(dashboardLiveStats.netR)} · {t.dashboard.backtestSeries}:{' '}
                     {formatR(dashboardBacktestStats.netR)}
                   </div>
+                  {(() => {
+                    const liveRR = dashboardLiveStats.payoffRatio;
+                    const btRR = dashboardBacktestStats.payoffRatio;
+                    const hasBothTrades =
+                      dashboardLiveStats.totalTrades > 0 &&
+                      dashboardBacktestStats.totalTrades > 0;
+                    if (!hasBothTrades || liveRR === null || btRR === null) {
+                      return (
+                        <div className="mt-1 font-mono text-[11px] text-slate-500 tabular-nums">
+                          {lang === 'en'
+                            ? 'R:R Variance:'
+                            : lang === 'es'
+                              ? 'Diferencia R:R:'
+                              : 'Scostamento RR Medio:'}{' '}
+                          {hasBothTrades
+                            ? `${liveRR === null ? 'Max' : `${liveRR.toFixed(2)}:1`} vs ${btRR === null ? 'Max' : `${btRR.toFixed(2)}:1`}`
+                            : 'N/D'}
+                        </div>
+                      );
+                    }
+                    const rrDelta = roundTo(liveRR - btRR, 2);
+                    const rrSign = rrDelta > 0 ? '+' : '';
+                    return (
+                      <div className="mt-1 font-mono text-[11px] text-slate-400 tabular-nums">
+                        {lang === 'en'
+                          ? 'R:R Variance:'
+                          : lang === 'es'
+                            ? 'Diferencia R:R:'
+                            : 'Scostamento RR Medio:'}{' '}
+                        <span
+                          className={`font-semibold ${
+                            rrDelta >= 0 ? 'text-emerald-400' : 'text-amber-400'
+                          }`}
+                        >
+                          {rrSign}
+                          {rrDelta.toFixed(2)}
+                        </span>{' '}
+                        <span className="text-slate-500">
+                          ({liveRR.toFixed(2)} vs {btRR.toFixed(2)})
+                        </span>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             </section>
