@@ -116,6 +116,31 @@ export interface WeekdayBreakdownItem {
   status: WeekdayPerformanceStatus;
 }
 
+export interface AssetSetupStat {
+  asset: string;
+  setup: string;
+  netR: number;
+  avgR: number;
+  totalTrades: number;
+  executedTrades: number;
+  wins: number;
+  losses: number;
+  winRatePct: number;
+}
+
+export interface WeekdayInsightsResult {
+  minExecutedApplied: number;
+  weakestDayIndex: (1 | 2 | 3 | 4 | 5) | null;
+  weakestOnWeakestDay: AssetSetupStat | null;
+  weakestDayFallbackMax: number | null;
+  topDayIndex: (1 | 2 | 3 | 4 | 5) | null;
+  bestOnTopDay: AssetSetupStat | null;
+  topDayFallbackMax: number | null;
+  overallBest: AssetSetupStat | null;
+  overallWorst: AssetSetupStat | null;
+  overallFallbackMax: number | null;
+}
+
 export interface PerformanceStats {
   totalTrades: number;
   executedTradesCount: number;

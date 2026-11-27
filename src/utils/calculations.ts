@@ -1,6 +1,7 @@
 import {
   type AkinatorScanResult,
   type AkinatorStreak,
+  type AssetSetupStat,
   type BiasType,
   MISSED_REASONS,
   type MissedStats,
@@ -9,6 +10,7 @@ import {
   type PeriodRPoint,
   type TradeRecord,
   type WeekdayBreakdownItem,
+  type WeekdayInsightsResult,
   type WeekdayPerformanceStatus,
   type WeeklyAssetSummary,
 } from '../types/trading';
@@ -1097,5 +1099,191 @@ export function calculateWeekdayBreakdown(
       status,
     };
   });
+}
+
+function aggregateAssetSetupStats(list: TradeRecord[]): AssetSetupStat[] {
+  interface Acc {
+    asset: string;
+    setup: string;
+    netR: number;
+    executedNetR: number;
+    totalTrades: number;
+    executedTrades: number;
+    wins: number;
+    losses: number;
+  }
+
+  const map = new Map<string, Acc>();
+  list.forEach((tr) => {
+    const asset = (tr.asset || '—').trim().toUpperCase();
+    const setup = (tr.setup || tr.strategy || 'S1').trim() || 'S1';
+    const key = `${asset}__${setup}`;
+    let acc = map.get(key);
+    if (!acc) {
+      acc = {
+        asset,
+        setup,
+        netR: 0,
+        executedNetR: 0,
+        totalTrades: 0,
+        executedTrades: 0,
+        wins: 0,
+        losses: 0,
+      };
+      map.set(key, acc);
+    }
+
+    const r = Number.isFinite(tr.netR) ? tr.netR : 0;
+    acc.totalTrades += 1;
+    acc.netR = roundTo(acc.netR + r, 2);
+    if (tr.outcome !== 'UNFILLED') {
+      acc.executedTrades += 1;
+      acc.executedNetR = roundTo(acc.executedNetR + r, 2);
+      if (tr.outcome === 'TP') acc.wins += 1;
+      else if (tr.outcome === 'STOP LOSS') acc.losses += 1;
+    }
+  });
+
+  return Array.from(map.values())
+    .filter((a) => a.executedTrades > 0)
+    .map((a) => ({
+      asset: a.asset,
+      setup: a.setup,
+      netR: roundTo(a.netR, 2),
+      avgR: a.executedTrades > 0 ? roundTo(a.executedNetR / a.executedTrades, 2) : 0,
+      totalTrades: a.totalTrades,
+      executedTrades: a.executedTrades,
+      wins: a.wins,
+      losses: a.losses,
+      winRatePct:
+        a.executedTrades > 0 ? roundTo((a.wins / a.executedTrades) * 100, 1) : 0,
+    }));
+}
+
+function sortBestAssetSetup(stats: AssetSetupStat[]): AssetSetupStat[] {
+  return [...stats].sort((a, b) => {
+    if (b.netR !== a.netR) return b.netR - a.netR;
+    if (b.avgR !== a.avgR) return b.avgR - a.avgR;
+    if (b.winRatePct !== a.winRatePct) return b.winRatePct - a.winRatePct;
+    return b.wins - a.wins;
+  });
+}
+
+function sortWorstAssetSetup(stats: AssetSetupStat[]): AssetSetupStat[] {
+  return [...stats].sort((a, b) => {
+    if (a.netR !== b.netR) return a.netR - b.netR;
+    if (a.avgR !== b.avgR) return a.avgR - b.avgR;
+    if (b.losses !== a.losses) return b.losses - a.losses;
+    return b.executedTrades - a.executedTrades;
+  });
+}
+
+function filterPoolByMinExecuted(
+  stats: AssetSetupStat[],
+  minExecuted: number,
+): { pool: AssetSetupStat[]; fallbackMax: number | null } {
+  if (stats.length === 0) return { pool: [], fallbackMax: null };
+  const qualified = stats.filter((s) => s.executedTrades >= minExecuted);
+  if (qualified.length > 0) {
+    return { pool: qualified, fallbackMax: null };
+  }
+  const maxAvail = Math.max(...stats.map((s) => s.executedTrades));
+  return {
+    pool: stats.filter((s) => s.executedTrades === maxAvail),
+    fallbackMax: maxAvail,
+  };
+}
+
+export function calculateWeekdayInsights(
+  trades: TradeRecord[],
+  days: WeekdayBreakdownItem[],
+  minExecuted = 15,
+): WeekdayInsightsResult {
+  const safeMin = Math.max(1, Math.floor(minExecuted));
+  const activeDays = days.filter((d) => d.executedTrades > 0);
+
+  const topDay =
+    activeDays.find((d) => d.status === 'top') ??
+    (() => {
+      if (activeDays.length === 0) return undefined;
+      const best = [...activeDays].sort((a, b) => b.netR - a.netR)[0];
+      return best && best.netR > 0 ? best : undefined;
+    })();
+
+  const weakestDay =
+    activeDays.find((d) => d.status === 'worst') ??
+    activeDays.find((d) => d.status === 'lowest') ??
+    (() => {
+      if (activeDays.length === 0) return undefined;
+      const worst = [...activeDays].sort((a, b) => a.netR - b.netR)[0];
+      if (!worst) return undefined;
+      if (worst.netR < 0) return worst;
+      if (activeDays.length >= 2 && worst.dayIndex !== topDay?.dayIndex) return worst;
+      return undefined;
+    })();
+
+  const tradesOnDay = (dayIdx: 1 | 2 | 3 | 4 | 5) =>
+    trades.filter((tr) => {
+      const dt = parseIsoDateUtc(tr.date);
+      return dt !== null && dt.getUTCDay() === dayIdx;
+    });
+
+  const topDayFiltered = topDay
+    ? filterPoolByMinExecuted(
+        aggregateAssetSetupStats(tradesOnDay(topDay.dayIndex)),
+        safeMin,
+      )
+    : { pool: [], fallbackMax: null };
+  const bestOnTopDay = sortBestAssetSetup(topDayFiltered.pool)[0] ?? null;
+
+  const weakestDayFiltered = weakestDay
+    ? filterPoolByMinExecuted(
+        aggregateAssetSetupStats(tradesOnDay(weakestDay.dayIndex)),
+        safeMin,
+      )
+    : { pool: [], fallbackMax: null };
+  const weakestOnWeakestDay =
+    sortWorstAssetSetup(weakestDayFiltered.pool)[0] ?? null;
+
+  const overallFiltered = filterPoolByMinExecuted(
+    aggregateAssetSetupStats(trades),
+    safeMin,
+  );
+  const overallPool = overallFiltered.pool;
+
+  let overallBest: AssetSetupStat | null = null;
+  let overallWorst: AssetSetupStat | null = null;
+
+  if (overallPool.length === 1) {
+    if (overallPool[0].netR >= 0) {
+      overallBest = overallPool[0];
+    } else {
+      overallWorst = overallPool[0];
+    }
+  } else if (overallPool.length >= 2) {
+    const desc = sortBestAssetSetup(overallPool);
+    const asc = sortWorstAssetSetup(overallPool);
+    overallBest = desc[0] ?? null;
+    overallWorst =
+      asc.find(
+        (item) =>
+          !overallBest ||
+          item.asset !== overallBest.asset ||
+          item.setup !== overallBest.setup,
+      ) ?? null;
+  }
+
+  return {
+    minExecutedApplied: safeMin,
+    weakestDayIndex: weakestDay?.dayIndex ?? null,
+    weakestOnWeakestDay,
+    weakestDayFallbackMax: weakestDayFiltered.fallbackMax,
+    topDayIndex: topDay?.dayIndex ?? null,
+    bestOnTopDay,
+    topDayFallbackMax: topDayFiltered.fallbackMax,
+    overallBest,
+    overallWorst,
+    overallFallbackMax: overallFiltered.fallbackMax,
+  };
 }
 
