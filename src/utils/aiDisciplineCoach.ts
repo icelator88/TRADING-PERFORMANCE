@@ -148,8 +148,14 @@ export function computeDisciplineMetrics(params: {
   missedTrades: TradeRecord[];
   liveStats: PerformanceStats;
   backtestStats: PerformanceStats;
+  liveStartDateByAsset?: Map<string, string>;
 }): DisciplineMetrics {
-  const { liveTrades, backtestTrades, missedTrades } = params;
+  const {
+    liveTrades,
+    backtestTrades,
+    missedTrades,
+    liveStartDateByAsset: providedLiveStartByAsset,
+  } = params;
 
   if (liveTrades.length === 0 && missedTrades.length === 0) {
     return {
@@ -170,18 +176,33 @@ export function computeDisciplineMetrics(params: {
     };
   }
 
-  // Scope Backtest trades to the active live window when live trades exist
-  const earliestLiveDate = liveTrades
-    .map((tr) => tr.date)
-    .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
-    .reduce<string | null>((min, d) => (!min || d < min ? d : min), null);
+  // Build per-asset earliest Journal Reale trade date map so each asset starts strictly from its own first live trade
+  const liveStartByAsset = new Map<string, string>();
+  if (providedLiveStartByAsset) {
+    providedLiveStartByAsset.forEach((date, asset) => {
+      if (asset && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        liveStartByAsset.set(normAsset(asset), date);
+      }
+    });
+  }
+  liveTrades.forEach((tr) => {
+    const assetKey = normAsset(tr.asset);
+    if (!assetKey || !/^\d{4}-\d{2}-\d{2}$/.test(tr.date)) return;
+    const prev = liveStartByAsset.get(assetKey);
+    if (!prev || tr.date < prev) {
+      liveStartByAsset.set(assetKey, tr.date);
+    }
+  });
 
   const scopedBacktest = sortTradesChronologically(
-    earliestLiveDate
-      ? backtestTrades.filter(
-          (tr) => !/^\d{4}-\d{2}-\d{2}$/.test(tr.date) || tr.date >= earliestLiveDate,
-        )
-      : backtestTrades,
+    liveStartByAsset.size > 0
+      ? backtestTrades.filter((tr) => {
+          const assetKey = normAsset(tr.asset);
+          const assetLiveStart = liveStartByAsset.get(assetKey);
+          if (!assetLiveStart) return false;
+          return !/^\d{4}-\d{2}-\d{2}$/.test(tr.date) || tr.date >= assetLiveStart;
+        })
+      : [],
   );
   const sortedLive = sortTradesChronologically(liveTrades);
   const sortedMissed = sortTradesChronologically(missedTrades);

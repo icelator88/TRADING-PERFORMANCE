@@ -9,6 +9,7 @@ interface PeriodDiscrepancyPanelProps {
   pnlMode: 'monthly' | 'daily';
   selectedPeriod: string | null;
   periodLabel: string | null;
+  liveStartDateByAsset?: Map<string, string>;
   backtestTrades: TradeRecord[];
   liveTrades: TradeRecord[];
   missedTrades: TradeRecord[];
@@ -109,6 +110,7 @@ export function PeriodDiscrepancyPanel({
   pnlMode,
   selectedPeriod,
   periodLabel,
+  liveStartDateByAsset,
   backtestTrades,
   liveTrades,
   missedTrades,
@@ -133,8 +135,31 @@ export function PeriodDiscrepancyPanel({
       };
     }
 
+    const effectiveStartByAsset = new Map<string, string>();
+    if (liveStartDateByAsset) {
+      liveStartDateByAsset.forEach((d, a) => {
+        if (a && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+          effectiveStartByAsset.set(normAsset(a), d);
+        }
+      });
+    }
+    liveTrades.forEach((tr) => {
+      const a = normAsset(tr.asset);
+      if (!a || !/^\d{4}-\d{2}-\d{2}$/.test(tr.date)) return;
+      const prev = effectiveStartByAsset.get(a);
+      if (!prev || tr.date < prev) {
+        effectiveStartByAsset.set(a, tr.date);
+      }
+    });
+
     const periodBt = backtestTrades
-      .filter((tr) => matchesPeriod(tr.date))
+      .filter((tr) => {
+        if (!matchesPeriod(tr.date)) return false;
+        if (effectiveStartByAsset.size === 0) return false;
+        const assetStart = effectiveStartByAsset.get(normAsset(tr.asset));
+        if (!assetStart) return false;
+        return !/^\d{4}-\d{2}-\d{2}$/.test(tr.date) || tr.date >= assetStart;
+      })
       .sort((a, b) => a.date.localeCompare(b.date) || (a.entryTime ?? '').localeCompare(b.entryTime ?? ''));
     const periodLive = liveTrades
       .filter((tr) => matchesPeriod(tr.date))
@@ -339,7 +364,7 @@ export function PeriodDiscrepancyPanel({
       periodBtNetR: Math.round(btSum * 100) / 100,
       periodLiveNetR: Math.round(liveSum * 100) / 100,
     };
-  }, [selectedPeriod, pnlMode, backtestTrades, liveTrades, missedTrades]);
+  }, [selectedPeriod, pnlMode, liveStartDateByAsset, backtestTrades, liveTrades, missedTrades]);
 
   const displayedRows = filterMode === 'discrepancies' ? discrepancyRows : allRows;
   const periodDeltaR = Math.round((periodLiveNetR - periodBtNetR) * 100) / 100;

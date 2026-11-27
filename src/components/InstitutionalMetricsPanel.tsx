@@ -1,11 +1,13 @@
 import { useState } from 'react';
 import { BarChart3, HelpCircle, ShieldCheck, Sliders, TrendingUp } from 'lucide-react';
 import type { Language, PerformanceStats } from '../types/trading';
-import { formatPct, formatR } from '../utils/calculations';
+import { formatDisplayDate, formatPct, formatR } from '../utils/calculations';
 
 interface InstitutionalMetricsPanelProps {
   stats: PerformanceStats;
+  pnlPrimaryStats?: PerformanceStats;
   comparisonStats?: PerformanceStats;
+  liveStartDate?: string | null;
   primaryLabel?: string;
   comparisonLabel?: string;
   lang: Language;
@@ -265,7 +267,9 @@ function formatStatsDisplay(s: PerformanceStats, compact = false) {
 
 export function InstitutionalMetricsPanel({
   stats,
+  pnlPrimaryStats,
   comparisonStats,
+  liveStartDate,
   primaryLabel = 'Backtest',
   comparisonLabel = 'Journal Reale',
   lang,
@@ -301,7 +305,11 @@ export function InstitutionalMetricsPanel({
   const primaryFmt = formatStatsDisplay(stats, isComparison);
   const compFmt = comparisonStats ? formatStatsDisplay(comparisonStats, true) : null;
 
-  const primaryBuckets = pnlMode === 'monthly' ? stats.monthlyBuckets : stats.dailyBuckets;
+  const chartPrimaryStats = pnlPrimaryStats ?? stats;
+  const primaryBuckets =
+    pnlMode === 'monthly'
+      ? chartPrimaryStats.monthlyBuckets
+      : chartPrimaryStats.dailyBuckets;
   const compBuckets = comparisonStats
     ? pnlMode === 'monthly'
       ? comparisonStats.monthlyBuckets
@@ -920,10 +928,28 @@ export function InstitutionalMetricsPanel({
       {/* Period PnL Distribution Bar Chart (Monthly / Daily in R) */}
       <section className="rounded-lg border border-[#1E2634] bg-[#121721] p-5">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             <BarChart3 className="h-4 w-4 text-sky-400" />
             <div>
-              <h3 className="text-sm font-semibold text-slate-100">{l.pnlTitle}</h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-sm font-semibold text-slate-100">{l.pnlTitle}</h3>
+                {isComparison && liveStartDate ? (
+                  <span
+                    title={
+                      lang === 'en'
+                        ? 'Comparison starts dynamically per asset from the first recorded Journal Reale trade date.'
+                        : 'Confronto allineato dinamicamente per singolo asset dalla prima data reale registrata in Journal Reale.'
+                    }
+                    className="rounded border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 font-mono text-[10px] font-medium text-emerald-300 tabular-nums whitespace-nowrap"
+                  >
+                    {lang === 'en'
+                      ? `Live Start: ${formatDisplayDate(liveStartDate)}`
+                      : lang === 'es'
+                        ? `Inicio Live: ${formatDisplayDate(liveStartDate)}`
+                        : `Inizio Journal Reale: ${formatDisplayDate(liveStartDate)}`}
+                  </span>
+                ) : null}
+              </div>
               <p className="text-xs text-slate-400">{l.pnlSub}</p>
             </div>
           </div>

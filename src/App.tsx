@@ -22,6 +22,7 @@ import { AkinatorCard } from './components/AkinatorCard';
 import { ConfirmModal } from './components/ConfirmModal';
 import { DrawdownChart } from './components/DrawdownChart';
 import { EquityChart } from './components/EquityChart';
+import { FixedTargetSimulationCard } from './components/FixedTargetSimulationCard';
 import { GeminiModal } from './components/GeminiModal';
 import {
   type AssetSyncOutcome,
@@ -795,6 +796,42 @@ export function App() {
     dashboardBacktestTrades,
   ]);
 
+  const allAssetsDashboardBacktestTrades = useMemo(() => {
+    if (isLastSyncedFilterActive) {
+      return backtestTrades.filter(
+        (tr) => tr.category === 'backtest' && lastSyncedIdSet.has(tr.id),
+      );
+    }
+    return backtestTrades.filter((tr) => {
+      if (tr.category !== 'backtest') return false;
+      if (selectedSetup !== 'ALL') {
+        const targetLower = selectedSetup.trim().toLowerCase();
+        const s = (tr.setup || tr.strategy || '').trim().toLowerCase();
+        if (s !== targetLower) return false;
+      }
+      const assetKey = tr.asset.trim().toUpperCase();
+      if (portfolioFilterMode !== 'all' && !activePortfolioAssetSet.has(assetKey)) {
+        return false;
+      }
+      if (isLiveAligned) {
+        const assetLiveStart = liveStartDateByAsset.get(assetKey);
+        if (assetLiveStart === undefined || tr.date < assetLiveStart) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [
+    isLastSyncedFilterActive,
+    backtestTrades,
+    lastSyncedIdSet,
+    selectedSetup,
+    portfolioFilterMode,
+    activePortfolioAssetSet,
+    isLiveAligned,
+    liveStartDateByAsset,
+  ]);
+
   const visibleDashboardLiveTrades = useMemo(() => {
     if (isLastSyncedFilterActive) {
       return liveTrades.filter(
@@ -824,40 +861,74 @@ export function App() {
     [visibleDashboardLiveTrades],
   );
 
+  const liveAlignedBacktestTrades = useMemo(() => {
+    if (isLastSyncedFilterActive) {
+      return backtestTrades.filter(
+        (tr) => tr.category === 'backtest' && lastSyncedIdSet.has(tr.id),
+      );
+    }
+    if (liveStartDateByAsset.size === 0) return [];
+    return dashboardPortfolioBacktest.filter((tr) => {
+      const assetKey = tr.asset.trim().toUpperCase();
+      const assetLiveStart = liveStartDateByAsset.get(assetKey);
+      return assetLiveStart !== undefined && tr.date >= assetLiveStart;
+    });
+  }, [
+    isLastSyncedFilterActive,
+    backtestTrades,
+    lastSyncedIdSet,
+    dashboardPortfolioBacktest,
+    liveStartDateByAsset,
+  ]);
+
+  const liveAlignedBacktestStats = useMemo(
+    () => calculatePerformanceStats(liveAlignedBacktestTrades),
+    [liveAlignedBacktestTrades],
+  );
+
+  const effectiveLiveComparisonStartDate = useMemo(() => {
+    if (assetFilter !== 'ALL') {
+      return liveStartDateByAsset.get(assetFilter.trim().toUpperCase()) ?? liveStartDate;
+    }
+    return liveStartDate;
+  }, [assetFilter, liveStartDateByAsset, liveStartDate]);
+
   const visibleDashboardCombinedTrades = useMemo(
     () => [...visibleDashboardBacktestTrades, ...visibleDashboardLiveTrades],
     [visibleDashboardBacktestTrades, visibleDashboardLiveTrades],
   );
 
-  const visibleDashboardMissedTrades = useMemo(() => {
+  const liveAlignedMissedTrades = useMemo(() => {
     if (isLastSyncedFilterActive) {
       return missedTrades.filter(
         (tr) => tr.category === 'missed' && lastSyncedIdSet.has(tr.id),
       );
     }
-    if (isLiveAligned && liveStartDate) {
-      return dashboardPortfolioMissed.filter((tr) => {
-        const assetStart =
-          liveStartDateByAsset.get(tr.asset.trim().toUpperCase()) ?? liveStartDate;
-        return tr.date >= assetStart;
-      });
-    }
-    return dashboardPortfolioMissed;
+    if (!effectiveLiveComparisonStartDate) return [];
+    return dashboardPortfolioMissed.filter((tr) => {
+      const assetStart =
+        liveStartDateByAsset.get(tr.asset.trim().toUpperCase()) ??
+        effectiveLiveComparisonStartDate;
+      return tr.date >= assetStart;
+    });
   }, [
     isLastSyncedFilterActive,
     missedTrades,
     lastSyncedIdSet,
-    isLiveAligned,
-    liveStartDate,
+    effectiveLiveComparisonStartDate,
     dashboardPortfolioMissed,
     liveStartDateByAsset,
   ]);
 
   const effectiveSelectedPnlPeriod = useMemo(() => {
+    const btSource =
+      liveStartDateByAsset.size > 0
+        ? liveAlignedBacktestStats
+        : dashboardBacktestStats;
     const btBuckets =
       dashboardPnlMode === 'monthly'
-        ? dashboardBacktestStats.monthlyBuckets
-        : dashboardBacktestStats.dailyBuckets;
+        ? btSource.monthlyBuckets
+        : btSource.dailyBuckets;
     const liveBuckets =
       dashboardPnlMode === 'monthly'
         ? dashboardLiveStats.monthlyBuckets
@@ -873,8 +944,9 @@ export function App() {
     return visiblePeriods[visiblePeriods.length - 1] ?? null;
   }, [
     dashboardPnlMode,
-    dashboardBacktestStats.monthlyBuckets,
-    dashboardBacktestStats.dailyBuckets,
+    liveStartDateByAsset.size,
+    liveAlignedBacktestStats,
+    dashboardBacktestStats,
     dashboardLiveStats.monthlyBuckets,
     dashboardLiveStats.dailyBuckets,
     selectedPnlPeriod,
@@ -2892,12 +2964,17 @@ export function App() {
               assetFilter={assetFilter}
               selectedSetup={selectedSetup}
               rangeMode={dashboardRangeMode}
-              liveStartDate={liveStartDate}
+              liveStartDate={effectiveLiveComparisonStartDate}
+              liveStartDateByAsset={liveStartDateByAsset}
               liveStats={dashboardLiveStats}
-              backtestStats={dashboardBacktestStats}
+              backtestStats={
+                liveStartDateByAsset.size > 0
+                  ? liveAlignedBacktestStats
+                  : dashboardBacktestStats
+              }
               liveTrades={visibleDashboardLiveTrades}
-              backtestTrades={visibleDashboardBacktestTrades}
-              missedTrades={visibleDashboardMissedTrades}
+              backtestTrades={liveAlignedBacktestTrades}
+              missedTrades={liveAlignedMissedTrades}
               onLastMistakeClick={handleLastMistakeClick}
             />
 
@@ -3114,7 +3191,13 @@ export function App() {
             {/* Institutional Analytics Summary: Backtest vs. Journal Reale */}
             <InstitutionalMetricsPanel
               stats={dashboardBacktestStats}
+              pnlPrimaryStats={
+                liveStartDateByAsset.size > 0
+                  ? liveAlignedBacktestStats
+                  : undefined
+              }
               comparisonStats={dashboardLiveStats}
+              liveStartDate={effectiveLiveComparisonStartDate}
               primaryLabel={t.nav.backtest}
               comparisonLabel={t.nav.live}
               lang={lang}
@@ -3133,9 +3216,18 @@ export function App() {
               pnlMode={dashboardPnlMode}
               selectedPeriod={effectiveSelectedPnlPeriod}
               periodLabel={effectiveSelectedPnlPeriodLabel}
-              backtestTrades={visibleDashboardBacktestTrades}
+              liveStartDateByAsset={liveStartDateByAsset}
+              backtestTrades={liveAlignedBacktestTrades}
               liveTrades={visibleDashboardLiveTrades}
-              missedTrades={visibleDashboardMissedTrades}
+              missedTrades={liveAlignedMissedTrades}
+            />
+
+            {/* Collapsible Fixed R Target Simulation (Based on RR Max, Backtest-only) */}
+            <FixedTargetSimulationCard
+              lang={lang}
+              assetFilter={assetFilter}
+              allAssetsBacktestTrades={allAssetsDashboardBacktestTrades}
+              selectedAssetBacktestTrades={visibleDashboardBacktestTrades}
             />
           </div>
         ) : null}

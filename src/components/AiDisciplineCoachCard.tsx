@@ -14,6 +14,7 @@ interface AiDisciplineCoachCardProps {
   selectedSetup: string;
   rangeMode: 'live_period' | 'all_backtest';
   liveStartDate: string | null;
+  liveStartDateByAsset?: Map<string, string>;
   liveStats: PerformanceStats;
   backtestStats: PerformanceStats;
   liveTrades: TradeRecord[];
@@ -28,6 +29,7 @@ export function AiDisciplineCoachCard({
   selectedSetup,
   rangeMode,
   liveStartDate,
+  liveStartDateByAsset,
   liveStats,
   backtestStats,
   liveTrades,
@@ -47,8 +49,9 @@ export function AiDisciplineCoachCard({
         missedTrades,
         liveStats,
         backtestStats,
+        liveStartDateByAsset,
       }),
-    [liveTrades, backtestTrades, missedTrades, liveStats, backtestStats],
+    [liveTrades, backtestTrades, missedTrades, liveStats, backtestStats, liveStartDateByAsset],
   );
 
   const scopeKey = `${assetFilter}|${selectedSetup}|${rangeMode}|${backtestTrades.length}|${liveTrades.length}|${missedTrades.length}`;
