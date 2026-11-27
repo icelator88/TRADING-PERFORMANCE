@@ -51,7 +51,7 @@ export function AiDisciplineCoachCard({
     [liveTrades, backtestTrades, missedTrades, liveStats, backtestStats],
   );
 
-  const scopeKey = `${assetFilter}|${selectedSetup}|${rangeMode}|${liveTrades.length}|${missedTrades.length}`;
+  const scopeKey = `${assetFilter}|${selectedSetup}|${rangeMode}|${backtestTrades.length}|${liveTrades.length}|${missedTrades.length}`;
   useEffect(() => {
     setBullets([]);
     setErrorMessage(null);
@@ -117,8 +117,8 @@ export function AiDisciplineCoachCard({
           </h2>
           <p className="mt-0.5 text-xs text-slate-400">
             {lang === 'en'
-              ? 'Mechanical adherence diagnostics across Journal Reale vs Backtest, Trade Non Presi, and NOTE logs.'
-              : 'Analisi di aderenza meccanica su Journal Reale vs Backtest, Trade Non Presi e note operative (es. PAUSA LAVORO).'}
+              ? 'Mechanical adherence diagnostics across Journal Reale vs Backtest (excludes conscious skips like CONSAPEVOLE, PAUSA LAVORO, FESTIVO).'
+              : 'Analisi di aderenza meccanica su Journal Reale vs Backtest (esclude skip consapevoli: CONSAPEVOLE, NON PRESO CONSAPEVOLE, PAUSA LAVORO, FESTIVO).'}
           </p>
         </div>
 
@@ -153,7 +153,11 @@ export function AiDisciplineCoachCard({
           </div>
           <div className="mt-1.5 font-mono text-[11px] text-slate-500 tabular-nums">
             {metrics.hasData
-              ? `${metrics.unforcedErrorsCount} deviazioni rilevate (${metrics.behavioralMissedCount} non presi · ${metrics.noteDeviationsCount} note)`
+              ? `${metrics.unforcedErrorsCount} errori reali (${metrics.behavioralMissedCount} non presi · ${metrics.unplannedExtraCount} extra · ${metrics.discrepancyCount} discrepanze · ${metrics.noteDeviationsCount} note)${
+                  metrics.consciousSkipsExcludedCount > 0
+                    ? ` · ${metrics.consciousSkipsExcludedCount} skip consapevoli esclusi`
+                    : ''
+                }`
               : 'Registra trade reali o non presi per il punteggio'}
           </div>
         </div>
@@ -172,7 +176,7 @@ export function AiDisciplineCoachCard({
           </div>
           <div className="mt-1.5 font-mono text-[11px] text-slate-500 tabular-nums">
             {metrics.hasData
-              ? `Piano meccanico rispettato senza errori non forzati (${metrics.totalTrackedDays} gg totali)`
+              ? `Piano meccanico rispettato senza errori non forzati (${metrics.totalTrackedDays} gg attivi)`
               : 'Nessuna sessione live tracciata'}
           </div>
           {metrics.hasData && metrics.lastMistake ? (
@@ -183,7 +187,9 @@ export function AiDisciplineCoachCard({
               title={
                 metrics.lastMistake.category === 'live'
                   ? 'Apri e evidenzia in Journal Reale'
-                  : 'Apri e evidenzia in Trade Non Presi'
+                  : metrics.lastMistake.category === 'backtest'
+                    ? 'Apri e evidenzia in Backtest (non preso in Live)'
+                    : 'Apri e evidenzia in Trade Non Presi'
               }
             >
               <span>
@@ -200,7 +206,9 @@ export function AiDisciplineCoachCard({
                 (
                 {metrics.lastMistake.category === 'live'
                   ? 'Journal Reale'
-                  : 'Trade Non Presi'}
+                  : metrics.lastMistake.category === 'backtest'
+                    ? 'Backtest Non Preso'
+                    : 'Trade Non Presi'}
                 )
               </span>
               <ArrowUpRight className="h-3 w-3 shrink-0 text-rose-400" />

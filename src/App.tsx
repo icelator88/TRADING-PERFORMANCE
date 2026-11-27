@@ -28,10 +28,13 @@ import {
   GoogleSheetsSyncModal,
 } from './components/GoogleSheetsSyncModal';
 import { ImportModal } from './components/ImportModal';
-import { InstitutionalMetricsPanel } from './components/InstitutionalMetricsPanel';
+import {
+  formatPeriodLabels,
+  InstitutionalMetricsPanel,
+} from './components/InstitutionalMetricsPanel';
 import { LoginScreen } from './components/LoginScreen';
-import { MartingaleSimulatorCard } from './components/MartingaleSimulatorCard';
 import { NewAssetModal } from './components/NewAssetModal';
+import { PeriodDiscrepancyPanel } from './components/PeriodDiscrepancyPanel';
 import { SetupFilterBar } from './components/SetupFilterBar';
 import { TradeModal } from './components/TradeModal';
 import { TradeTable } from './components/TradeTable';
@@ -126,6 +129,8 @@ export function App() {
   const [dashboardRangeMode, setDashboardRangeMode] = useState<
     'live_period' | 'all_backtest'
   >('live_period');
+  const [dashboardPnlMode, setDashboardPnlMode] = useState<'monthly' | 'daily'>('monthly');
+  const [selectedPnlPeriod, setSelectedPnlPeriod] = useState<string | null>(null);
   const [focusedMistakeFilter, setFocusedMistakeFilter] =
     useState<LastMistakeInfo | null>(null);
 
@@ -823,6 +828,62 @@ export function App() {
     () => [...visibleDashboardBacktestTrades, ...visibleDashboardLiveTrades],
     [visibleDashboardBacktestTrades, visibleDashboardLiveTrades],
   );
+
+  const visibleDashboardMissedTrades = useMemo(() => {
+    if (isLastSyncedFilterActive) {
+      return missedTrades.filter(
+        (tr) => tr.category === 'missed' && lastSyncedIdSet.has(tr.id),
+      );
+    }
+    if (isLiveAligned && liveStartDate) {
+      return dashboardPortfolioMissed.filter((tr) => {
+        const assetStart =
+          liveStartDateByAsset.get(tr.asset.trim().toUpperCase()) ?? liveStartDate;
+        return tr.date >= assetStart;
+      });
+    }
+    return dashboardPortfolioMissed;
+  }, [
+    isLastSyncedFilterActive,
+    missedTrades,
+    lastSyncedIdSet,
+    isLiveAligned,
+    liveStartDate,
+    dashboardPortfolioMissed,
+    liveStartDateByAsset,
+  ]);
+
+  const effectiveSelectedPnlPeriod = useMemo(() => {
+    const btBuckets =
+      dashboardPnlMode === 'monthly'
+        ? dashboardBacktestStats.monthlyBuckets
+        : dashboardBacktestStats.dailyBuckets;
+    const liveBuckets =
+      dashboardPnlMode === 'monthly'
+        ? dashboardLiveStats.monthlyBuckets
+        : dashboardLiveStats.dailyBuckets;
+    const allPeriods = Array.from(
+      new Set([...btBuckets.map((b) => b.period), ...liveBuckets.map((b) => b.period)]),
+    ).sort((a, b) => a.localeCompare(b));
+    const visiblePeriods =
+      dashboardPnlMode === 'monthly' ? allPeriods : allPeriods.slice(-45);
+    if (selectedPnlPeriod && visiblePeriods.includes(selectedPnlPeriod)) {
+      return selectedPnlPeriod;
+    }
+    return visiblePeriods[visiblePeriods.length - 1] ?? null;
+  }, [
+    dashboardPnlMode,
+    dashboardBacktestStats.monthlyBuckets,
+    dashboardBacktestStats.dailyBuckets,
+    dashboardLiveStats.monthlyBuckets,
+    dashboardLiveStats.dailyBuckets,
+    selectedPnlPeriod,
+  ]);
+
+  const effectiveSelectedPnlPeriodLabel = useMemo(() => {
+    if (!effectiveSelectedPnlPeriod) return null;
+    return formatPeriodLabels(effectiveSelectedPnlPeriod, dashboardPnlMode, lang).full;
+  }, [effectiveSelectedPnlPeriod, dashboardPnlMode, lang]);
 
   // Portfolio Rotation Alert: monitor unselected Backtest assets over the last 30 days
   const portfolioRotationAlert = useMemo(() => {
@@ -2836,20 +2897,7 @@ export function App() {
               backtestStats={dashboardBacktestStats}
               liveTrades={visibleDashboardLiveTrades}
               backtestTrades={visibleDashboardBacktestTrades}
-              missedTrades={
-                isLastSyncedFilterActive
-                  ? missedTrades.filter(
-                      (tr) => tr.category === 'missed' && lastSyncedIdSet.has(tr.id),
-                    )
-                  : isLiveAligned && liveStartDate
-                    ? dashboardPortfolioMissed.filter((tr) => {
-                        const assetStart =
-                          liveStartDateByAsset.get(tr.asset.trim().toUpperCase()) ??
-                          liveStartDate;
-                        return tr.date >= assetStart;
-                      })
-                    : dashboardPortfolioMissed
-              }
+              missedTrades={visibleDashboardMissedTrades}
               onLastMistakeClick={handleLastMistakeClick}
             />
 
@@ -3070,13 +3118,24 @@ export function App() {
               primaryLabel={t.nav.backtest}
               comparisonLabel={t.nav.live}
               lang={lang}
+              pnlMode={dashboardPnlMode}
+              onPnlModeChange={(nextMode) => {
+                setDashboardPnlMode(nextMode);
+                setSelectedPnlPeriod(null);
+              }}
+              selectedPeriod={effectiveSelectedPnlPeriod}
+              onSelectPeriod={(period) => setSelectedPnlPeriod(period)}
             />
 
-            {/* Read-Only What-If Progression & Martingale Simulator */}
-            <MartingaleSimulatorCard
+            {/* Interactive Period Detail & Execution Discrepancy Inspector */}
+            <PeriodDiscrepancyPanel
               lang={lang}
+              pnlMode={dashboardPnlMode}
+              selectedPeriod={effectiveSelectedPnlPeriod}
+              periodLabel={effectiveSelectedPnlPeriodLabel}
               backtestTrades={visibleDashboardBacktestTrades}
               liveTrades={visibleDashboardLiveTrades}
+              missedTrades={visibleDashboardMissedTrades}
             />
           </div>
         ) : null}
@@ -3242,11 +3301,68 @@ export function App() {
               </div>
             </div>
 
+            {focusedMistakeFilter && focusedMistakeFilter.category === 'backtest' ? (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-xs">
+                <div className="flex flex-wrap items-center gap-2 text-rose-200">
+                  <span className="font-semibold">
+                    {lang === 'en'
+                      ? `Filtered by last mistake date: ${formatDisplayDate(focusedMistakeFilter.date)}`
+                      : lang === 'es'
+                        ? `Filtrado por fecha del último error: ${formatDisplayDate(focusedMistakeFilter.date)}`
+                        : `Filtro attivo su ultimo errore: ${formatDisplayDate(focusedMistakeFilter.date)}`}
+                  </span>
+                  <span className="text-rose-300/80">
+                    ({focusedMistakeFilter.tradeIds.length}{' '}
+                    {focusedMistakeFilter.tradeIds.length === 1
+                      ? lang === 'en'
+                        ? 'entry highlighted'
+                        : 'voce evidenziata'
+                      : lang === 'en'
+                        ? 'entries highlighted'
+                        : 'voci evidenziate'}
+                    )
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFocusedMistakeFilter(null)}
+                  className="rounded border border-rose-400/40 bg-[#0B0E14] px-2.5 py-1 font-medium text-rose-200 transition-colors hover:border-rose-300 hover:text-white"
+                >
+                  {lang === 'en'
+                    ? 'Show all trades'
+                    : lang === 'es'
+                      ? 'Mostrar todas las operaciones'
+                      : 'Mostra tutti i trade'}
+                </button>
+              </div>
+            ) : null}
+
             <TradeTable
-              trades={applySearchAndSubFilters(dashboardPortfolioBacktest, 'backtest')}
+              trades={(() => {
+                const base = applySearchAndSubFilters(dashboardPortfolioBacktest, 'backtest');
+                if (focusedMistakeFilter?.category !== 'backtest') return base;
+                const byDateInPortfolio = base.filter(
+                  (tr) => tr.date === focusedMistakeFilter.date,
+                );
+                if (byDateInPortfolio.length > 0) return byDateInPortfolio;
+                return backtestTrades.filter(
+                  (tr) =>
+                    tr.category === 'backtest' && tr.date === focusedMistakeFilter.date,
+                );
+              })()}
               category="backtest"
               t={t}
               emptyMessage={t.journal.emptyBacktest}
+              highlightedTradeIds={
+                focusedMistakeFilter?.category === 'backtest'
+                  ? focusedMistakeFilter.tradeIds
+                  : undefined
+              }
+              highlightDate={
+                focusedMistakeFilter?.category === 'backtest'
+                  ? focusedMistakeFilter.date
+                  : null
+              }
               onAddFirst={() => {
                 setEditingTrade(null);
                 setTradeModalCategory('backtest');

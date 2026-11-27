@@ -10,6 +10,10 @@ interface InstitutionalMetricsPanelProps {
   comparisonLabel?: string;
   lang: Language;
   titlePrefix?: string;
+  pnlMode?: 'monthly' | 'daily';
+  onPnlModeChange?: (mode: 'monthly' | 'daily') => void;
+  selectedPeriod?: string | null;
+  onSelectPeriod?: (period: string, mode: 'monthly' | 'daily') => void;
 }
 
 interface MetricTooltipProps {
@@ -159,7 +163,7 @@ const WEEKDAYS_SHORT: Record<Language, string[]> = {
   es: ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'],
 };
 
-function formatPeriodLabels(
+export function formatPeriodLabels(
   period: string,
   mode: 'monthly' | 'daily',
   lang: Language,
@@ -266,8 +270,23 @@ export function InstitutionalMetricsPanel({
   comparisonLabel = 'Journal Reale',
   lang,
   titlePrefix,
+  pnlMode: controlledPnlMode,
+  onPnlModeChange,
+  selectedPeriod: controlledSelectedPeriod,
+  onSelectPeriod,
 }: InstitutionalMetricsPanelProps) {
-  const [pnlMode, setPnlMode] = useState<'monthly' | 'daily'>('monthly');
+  const [internalPnlMode, setInternalPnlMode] = useState<'monthly' | 'daily'>('monthly');
+  const [internalSelectedPeriod, setInternalSelectedPeriod] = useState<string | null>(null);
+  const pnlMode = controlledPnlMode ?? internalPnlMode;
+
+  const setPnlMode = (nextMode: 'monthly' | 'daily') => {
+    if (onPnlModeChange) {
+      onPnlModeChange(nextMode);
+    } else {
+      setInternalPnlMode(nextMode);
+    }
+  };
+
   const [hoveredPeriod, setHoveredPeriod] = useState<{
     period: string;
     displayLabel: string;
@@ -309,6 +328,22 @@ export function InstitutionalMetricsPanel({
 
   const visibleMerged =
     pnlMode === 'monthly' ? mergedBuckets : mergedBuckets.slice(-45);
+  const visiblePeriodKeys = visibleMerged.map((m) => m.period);
+  const requestedSelectedPeriod =
+    controlledSelectedPeriod !== undefined ? controlledSelectedPeriod : internalSelectedPeriod;
+  const effectiveSelectedPeriod =
+    requestedSelectedPeriod && visiblePeriodKeys.includes(requestedSelectedPeriod)
+      ? requestedSelectedPeriod
+      : (visiblePeriodKeys[visiblePeriodKeys.length - 1] ?? null);
+
+  const handleSelectBar = (period: string) => {
+    if (onSelectPeriod) {
+      onSelectPeriod(period, pnlMode);
+    } else {
+      setInternalSelectedPeriod(period);
+    }
+  };
+
   const maxAbsR = Math.max(
     1,
     ...visibleMerged.flatMap((item) => [
@@ -942,6 +977,13 @@ export function InstitutionalMetricsPanel({
                   </>
                 )}
               </div>
+            ) : isComparison && effectiveSelectedPeriod ? (
+              <div className="rounded border border-sky-500/35 bg-sky-500/10 px-2.5 py-1 font-mono text-[11px] text-sky-300 tabular-nums">
+                {lang === 'en' ? 'Selected:' : 'Selezionato:'}{' '}
+                <span className="font-semibold text-sky-200">
+                  {formatPeriodLabels(effectiveSelectedPeriod, pnlMode, lang).full}
+                </span>
+              </div>
             ) : null}
 
             <div
@@ -1015,6 +1057,7 @@ export function InstitutionalMetricsPanel({
                   const p = item.primary;
                   const c = item.comparison;
                   const formatted = formatPeriodLabels(item.period, pnlMode, lang);
+                  const isSelected = isComparison && effectiveSelectedPeriod === item.period;
 
                   if (!isComparison && p) {
                     const pct = Math.max(10, Math.round((Math.abs(p.netR) / maxAbsR) * 82));
@@ -1022,6 +1065,15 @@ export function InstitutionalMetricsPanel({
                     return (
                       <div
                         key={item.period}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => handleSelectBar(item.period)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            handleSelectBar(item.period);
+                          }
+                        }}
                         onMouseEnter={() =>
                           setHoveredPeriod({
                             ...p,
@@ -1029,7 +1081,7 @@ export function InstitutionalMetricsPanel({
                           })
                         }
                         onMouseLeave={() => setHoveredPeriod(null)}
-                        className="group relative flex flex-1 min-w-[56px] flex-col cursor-pointer"
+                        className="group relative flex flex-1 min-w-[56px] flex-col cursor-pointer rounded-md transition-colors hover:bg-white/[0.03]"
                       >
                         <div className="flex flex-1 flex-col items-center justify-end pb-0.5">
                           {positive ? (
@@ -1074,6 +1126,16 @@ export function InstitutionalMetricsPanel({
                   return (
                     <div
                       key={item.period}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={isSelected}
+                      onClick={() => handleSelectBar(item.period)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          handleSelectBar(item.period);
+                        }
+                      }}
                       onMouseEnter={() =>
                         setHoveredPeriod({
                           period: item.period,
@@ -1085,7 +1147,11 @@ export function InstitutionalMetricsPanel({
                         })
                       }
                       onMouseLeave={() => setHoveredPeriod(null)}
-                      className="group relative flex flex-1 min-w-[76px] flex-col cursor-pointer"
+                      className={`group relative flex flex-1 min-w-[76px] flex-col cursor-pointer rounded-md px-0.5 transition-all ${
+                        isSelected
+                          ? 'bg-sky-500/[0.12] ring-1 ring-sky-400/75'
+                          : 'hover:bg-white/[0.04]'
+                      }`}
                     >
                       {/* Top half: Positive grouped bars */}
                       <div className="flex flex-1 items-end justify-center gap-1 pb-0.5">
@@ -1097,7 +1163,9 @@ export function InstitutionalMetricsPanel({
                               </span>
                               <div
                                 style={{ height: `${pPct}%` }}
-                                className="w-full max-w-[22px] rounded-t bg-emerald-500/85 transition-opacity group-hover:opacity-85"
+                                className={`w-full max-w-[22px] rounded-t bg-emerald-500 transition-opacity ${
+                                  isSelected ? 'opacity-100' : 'opacity-85 group-hover:opacity-100'
+                                }`}
                               />
                             </>
                           ) : null}
@@ -1111,7 +1179,9 @@ export function InstitutionalMetricsPanel({
                               </span>
                               <div
                                 style={{ height: `${cPct}%`, backgroundColor: '#3B82F6' }}
-                                className="w-full max-w-[22px] rounded-t opacity-90 transition-opacity group-hover:opacity-100"
+                                className={`w-full max-w-[22px] rounded-t transition-opacity ${
+                                  isSelected ? 'opacity-100' : 'opacity-90 group-hover:opacity-100'
+                                }`}
                               />
                             </>
                           ) : null}
@@ -1125,7 +1195,9 @@ export function InstitutionalMetricsPanel({
                             <>
                               <div
                                 style={{ height: `${pPct}%` }}
-                                className="w-full max-w-[22px] rounded-b bg-rose-500/85 transition-opacity group-hover:opacity-85"
+                                className={`w-full max-w-[22px] rounded-b bg-rose-500 transition-opacity ${
+                                  isSelected ? 'opacity-100' : 'opacity-85 group-hover:opacity-100'
+                                }`}
                               />
                               <span className="mt-0.5 font-mono text-[10px] text-rose-400 tabular-nums whitespace-nowrap">
                                 {pVal.toFixed(1)}
@@ -1139,7 +1211,9 @@ export function InstitutionalMetricsPanel({
                             <>
                               <div
                                 style={{ height: `${cPct}%`, backgroundColor: '#3B82F6' }}
-                                className="w-full max-w-[22px] rounded-b opacity-90 transition-opacity group-hover:opacity-100"
+                                className={`w-full max-w-[22px] rounded-b transition-opacity ${
+                                  isSelected ? 'opacity-100' : 'opacity-90 group-hover:opacity-100'
+                                }`}
                               />
                               <span className="mt-0.5 font-mono text-[10px] text-[#60A5FA] tabular-nums whitespace-nowrap">
                                 {cVal.toFixed(1)}
@@ -1157,19 +1231,28 @@ export function InstitutionalMetricsPanel({
               <div className="mt-2 flex gap-2 border-t border-[#1E2634] pt-2">
                 {visibleMerged.map((item) => {
                   const formatted = formatPeriodLabels(item.period, pnlMode, lang);
+                  const isSelected = isComparison && effectiveSelectedPeriod === item.period;
                   return (
-                    <div
+                    <button
                       key={`lbl_${item.period}`}
+                      type="button"
+                      onClick={() => handleSelectBar(item.period)}
                       title={formatted.full}
                       className={`flex flex-1 ${
                         isComparison ? 'min-w-[76px]' : 'min-w-[56px]'
-                      } flex-col items-center text-center font-mono text-[10px] leading-tight text-slate-300 whitespace-nowrap`}
+                      } flex-col items-center rounded px-1 py-0.5 text-center font-mono text-[10px] leading-tight whitespace-nowrap transition-colors ${
+                        isSelected
+                          ? 'bg-sky-500/20 font-semibold text-sky-300 ring-1 ring-sky-400/50'
+                          : 'text-slate-300 hover:bg-white/[0.04] hover:text-white'
+                      }`}
                     >
                       <span>{formatted.primary}</span>
                       {formatted.secondary ? (
-                        <span className="text-[9px] text-slate-500">{formatted.secondary}</span>
+                        <span className={`text-[9px] ${isSelected ? 'text-sky-300/80' : 'text-slate-500'}`}>
+                          {formatted.secondary}
+                        </span>
                       ) : null}
-                    </div>
+                    </button>
                   );
                 })}
               </div>

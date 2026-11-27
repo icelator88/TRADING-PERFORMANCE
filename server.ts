@@ -79,7 +79,7 @@ async function startServer(): Promise<void> {
             'Ogni punto deve essere breve, incisivo (1-2 frasi al massimo), privo di convenevoli o introduzioni.',
             'Regole per i 3 punti:',
             '1) Confronta chiaramente Journal Reale vs Backtest indicando dove avviene lo scostamento (R, Win Rate o setup).',
-            '2) Evidenzia gli errori comportamentali/operativi emersi da Trade Non Presi e dalla colonna NOTE (es. PAUSA LAVORO, esitazione, distrazione, uscite emotive).',
+            '2) Evidenzia SOLO i veri errori esecutivi/comportamentali (trade backtest non presi senza giustificazione, trade extra fuori backtest, discrepanze esito/direzione o note come x sbaglio/fuori piano). NON considerare mai errori gli skip consapevoli (CONSAPEVOLE, NON PRESO CONSAPEVOLE, PAUSA LAVORO, FESTIVO).',
             '3) Dai un consiglio pratico e immediato da applicare dalla prossima sessione per azzerare questi errori.',
           ].join(' '),
           responseMimeType: 'application/json',

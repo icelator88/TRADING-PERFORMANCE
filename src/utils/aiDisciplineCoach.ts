@@ -8,7 +8,7 @@ export interface DisciplinePatternTag {
 
 export interface LastMistakeInfo {
   date: string;
-  category: 'live' | 'missed';
+  category: 'live' | 'missed' | 'backtest';
   tradeIds: string[];
   primaryTradeId: string;
 }
@@ -23,6 +23,9 @@ export interface DisciplineMetrics {
   unforcedErrorsCount: number;
   noteDeviationsCount: number;
   behavioralMissedCount: number;
+  unplannedExtraCount: number;
+  discrepancyCount: number;
+  consciousSkipsExcludedCount: number;
   detectedTags: DisciplinePatternTag[];
   lastMistake: LastMistakeInfo | null;
 }
@@ -40,13 +43,36 @@ export interface AiCoachAnalysisInput {
   metrics: DisciplineMetrics;
 }
 
-const DEVIATION_PATTERNS: Array<{ label: string; regex: RegExp }> = [
-  { label: 'PAUSA LAVORO', regex: /\bpausa\s*lavoro\b|\blavoro\b|\bpausa\b/i },
-  { label: 'FOMO / Revenge', regex: /\bfomo\b|\brevenge\b|\bimpuls|\bfretta\b/i },
-  { label: 'Paura / Esitazione', regex: /\bpaura\b|\besitaz|\bansia\b|\binsicur/i },
-  { label: 'Distrazione / Ritardo', regex: /\bdistraz|\britard|\btardi\b|\bperso\b|\bsaltat|\blate\b/i },
-  { label: 'Fuori Piano / Regole', regex: /\bfuori\s*(piano|orario|regol)|\berrore\b|\bsbagli|\bovertrad|\banticipat/i },
-  { label: 'Gestione Emotiva (SL/TP)', regex: /\bchius[ao]\s*prima\b|\bspostat[ao]\s*sl\b|\bemotiv|\bnoia\b|\bstanch/i },
+const CONSCIOUS_SKIP_REGEX =
+  /(?:non[\s_-]+preso[\s_-]+consapevole|consapevole|pausa[\s_-]*lavoro|festiv[oi]?)/i;
+
+const EXPLICIT_MISTAKE_PATTERNS: Array<{ label: string; regex: RegExp }> = [
+  {
+    label: 'Errore / X Sbaglio',
+    regex: /\bx\s*sbaglio\b|\bper\s*sbaglio\b|\bsbagli[oa]\w*|\berror[ei]\b/i,
+  },
+  {
+    label: 'Fuori Piano',
+    regex:
+      /\bfuori\s*(?:piano|orario|regol\w*|strategia|setup)\b|\bovertrad\w*|\banticipat\w*/i,
+  },
+  {
+    label: 'FOMO / Revenge',
+    regex: /\bfomo\b|\brevenge\b|\bimpuls\w*|\bfretta\b/i,
+  },
+  {
+    label: 'Paura / Esitazione',
+    regex: /\bpaura\b|\besitaz\w*|\bansia\b|\binsicur\w*/i,
+  },
+  {
+    label: 'Distrazione / Ritardo',
+    regex: /\bdistraz\w*|\britard\w*|\btardi\b|\bperso\b|\blate\b/i,
+  },
+  {
+    label: 'Gestione Emotiva (SL/TP)',
+    regex:
+      /\bchius[ao]\s*prima\b|\bspostat[ao]\s*sl\b|\bemotiv\w*|\bnoia\b|\bstanch\w*/i,
+  },
 ];
 
 const MARKET_ONLY_MISSED_REASONS = new Set([
@@ -54,16 +80,59 @@ const MARKET_ONLY_MISSED_REASONS = new Set([
   'spread alto',
 ]);
 
-function detectNoteFlags(rawNotes: string | undefined): string[] {
-  const text = (rawNotes ?? '').trim();
+function getCombinedTradeText(trade: TradeRecord): string {
+  const extraValues = trade.extraColumns ? Object.values(trade.extraColumns) : [];
+  return [trade.notes ?? '', trade.missedReason ?? '', ...extraValues]
+    .filter((v) => typeof v === 'string' && v.trim().length > 0)
+    .join(' | ');
+}
+
+export function isConsciousSkipTrade(trade: TradeRecord): boolean {
+  const text = getCombinedTradeText(trade);
+  if (!text) return false;
+  return CONSCIOUS_SKIP_REGEX.test(text);
+}
+
+function detectExplicitMistakeFlags(trade: TradeRecord): string[] {
+  if (isConsciousSkipTrade(trade)) return [];
+  const text = [trade.notes ?? '', trade.missedReason ?? ''].join(' ').trim();
   if (!text) return [];
   const matched: string[] = [];
-  for (const pat of DEVIATION_PATTERNS) {
+  for (const pat of EXPLICIT_MISTAKE_PATTERNS) {
     if (pat.regex.test(text)) {
       matched.push(pat.label);
     }
   }
   return matched;
+}
+
+function normAsset(asset: string | undefined): string {
+  return (asset ?? '').trim().toUpperCase();
+}
+
+function normSetup(setup: string | undefined): string {
+  return (setup ?? '').trim().toUpperCase();
+}
+
+function normBias(bias: string | undefined): string {
+  return (bias ?? '').trim().toUpperCase();
+}
+
+function parseMinutes(entryTime: string | undefined): number | null {
+  const raw = (entryTime ?? '').trim();
+  const match = raw.match(/(\d{1,2}):(\d{2})/);
+  if (!match) return null;
+  const h = Number(match[1]);
+  const m = Number(match[2]);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  return h * 60 + m;
+}
+
+function timeDistanceMinutes(a: TradeRecord, b: TradeRecord): number {
+  const ma = parseMinutes(a.entryTime);
+  const mb = parseMinutes(b.entryTime);
+  if (ma === null || mb === null) return 0;
+  return Math.abs(ma - mb);
 }
 
 export function getAdherenceEmoji(score: number): string {
@@ -80,10 +149,9 @@ export function computeDisciplineMetrics(params: {
   liveStats: PerformanceStats;
   backtestStats: PerformanceStats;
 }): DisciplineMetrics {
-  const { liveTrades, backtestTrades, missedTrades, liveStats, backtestStats } = params;
-  const totalEvents = liveTrades.length + missedTrades.length;
+  const { liveTrades, backtestTrades, missedTrades } = params;
 
-  if (totalEvents === 0) {
+  if (liveTrades.length === 0 && missedTrades.length === 0) {
     return {
       hasData: false,
       adherenceScore: 100,
@@ -94,10 +162,96 @@ export function computeDisciplineMetrics(params: {
       unforcedErrorsCount: 0,
       noteDeviationsCount: 0,
       behavioralMissedCount: 0,
+      unplannedExtraCount: 0,
+      discrepancyCount: 0,
+      consciousSkipsExcludedCount: 0,
       detectedTags: [],
       lastMistake: null,
     };
   }
+
+  // Scope Backtest trades to the active live window when live trades exist
+  const earliestLiveDate = liveTrades
+    .map((tr) => tr.date)
+    .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+    .reduce<string | null>((min, d) => (!min || d < min ? d : min), null);
+
+  const scopedBacktest = sortTradesChronologically(
+    earliestLiveDate
+      ? backtestTrades.filter(
+          (tr) => !/^\d{4}-\d{2}-\d{2}$/.test(tr.date) || tr.date >= earliestLiveDate,
+        )
+      : backtestTrades,
+  );
+  const sortedLive = sortTradesChronologically(liveTrades);
+  const sortedMissed = sortTradesChronologically(missedTrades);
+
+  const hasBacktestBaseline = scopedBacktest.length > 0;
+
+  // Match Backtest trades with Journal Reale trades by Date, Asset, and Setup/Direction
+  const matchedLiveIds = new Set<string>();
+  const matchedBtIds = new Set<string>();
+  const matchedPairs: Array<{ bt: TradeRecord; live: TradeRecord }> = [];
+
+  // Pass 1: Exact Date + Asset + Setup + Direction (Bias)
+  scopedBacktest.forEach((bt) => {
+    let bestLive: TradeRecord | null = null;
+    let bestDist = Infinity;
+
+    for (const live of sortedLive) {
+      if (matchedLiveIds.has(live.id)) continue;
+      if (
+        live.date === bt.date &&
+        normAsset(live.asset) === normAsset(bt.asset) &&
+        normSetup(live.setup) === normSetup(bt.setup) &&
+        normBias(live.bias) === normBias(bt.bias)
+      ) {
+        const dist = timeDistanceMinutes(bt, live);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestLive = live;
+        }
+      }
+    }
+
+    if (bestLive) {
+      matchedBtIds.add(bt.id);
+      matchedLiveIds.add(bestLive.id);
+      matchedPairs.push({ bt, live: bestLive });
+    }
+  });
+
+  // Pass 2: Same Date + Asset + Setup (or missing setup), catching wrong direction
+  scopedBacktest.forEach((bt) => {
+    if (matchedBtIds.has(bt.id)) return;
+    let bestLive: TradeRecord | null = null;
+    let bestDist = Infinity;
+
+    const btSetup = normSetup(bt.setup);
+    for (const live of sortedLive) {
+      if (matchedLiveIds.has(live.id)) continue;
+      const liveSetup = normSetup(live.setup);
+      const setupMatches =
+        btSetup === liveSetup || !btSetup || !liveSetup;
+      if (
+        live.date === bt.date &&
+        normAsset(live.asset) === normAsset(bt.asset) &&
+        setupMatches
+      ) {
+        const dist = timeDistanceMinutes(bt, live);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestLive = live;
+        }
+      }
+    }
+
+    if (bestLive) {
+      matchedBtIds.add(bt.id);
+      matchedLiveIds.add(bestLive.id);
+      matchedPairs.push({ bt, live: bestLive });
+    }
+  });
 
   const tagCounts = new Map<string, number>();
   const bumpTag = (label: string) => {
@@ -108,84 +262,322 @@ export function computeDisciplineMetrics(params: {
     id: string;
     date: string;
     entryTime: string;
-    category: 'live' | 'missed';
+    category: 'live' | 'missed' | 'backtest';
     isError: boolean;
+    isConsciousSkip: boolean;
     createdAt: number;
   }
 
   const events: EventEntry[] = [];
   let noteDeviationsCount = 0;
   let behavioralMissedCount = 0;
+  let unplannedExtraCount = 0;
+  let discrepancyCount = 0;
+  let consciousSkipsExcludedCount = 0;
+  const countedSkippedIds = new Set<string>();
 
-  liveTrades.forEach((tr) => {
-    const flags = detectNoteFlags(tr.notes);
-    flags.forEach(bumpTag);
-    const hasDeviation = flags.length > 0;
-    if (hasDeviation) noteDeviationsCount += 1;
+  const registerConsciousSkip = (trade: TradeRecord) => {
+    if (!countedSkippedIds.has(trade.id)) {
+      countedSkippedIds.add(trade.id);
+      consciousSkipsExcludedCount += 1;
+    }
+  };
+
+  // 1) Evaluate matched Backtest <-> Journal Reale pairs
+  matchedPairs.forEach(({ bt, live }) => {
+    if (isConsciousSkipTrade(bt) || isConsciousSkipTrade(live)) {
+      registerConsciousSkip(isConsciousSkipTrade(live) ? live : bt);
+      events.push({
+        id: live.id,
+        date: live.date,
+        entryTime: live.entryTime ?? '',
+        category: 'live',
+        isError: false,
+        isConsciousSkip: true,
+        createdAt: live.createdAt,
+      });
+      return;
+    }
+
+    const pairTags = new Set<string>();
+    const mistakeFlags = detectExplicitMistakeFlags(live);
+    mistakeFlags.forEach((f) => pairTags.add(f));
+
+    let hasDiscrepancy = false;
+    if (normBias(bt.bias) !== normBias(live.bias)) {
+      hasDiscrepancy = true;
+      pairTags.add('Direzione Errata');
+    }
+
+    if (bt.outcome === 'TP' && (live.outcome === 'STOP LOSS' || live.outcome === 'BE')) {
+      hasDiscrepancy = true;
+      pairTags.add('Esito Peggiore vs BT (TP→SL/BE)');
+    } else if (bt.outcome === 'BE' && live.outcome === 'STOP LOSS') {
+      hasDiscrepancy = true;
+      pairTags.add('Esito Peggiore vs BT (BE→SL)');
+    } else if (bt.outcome === 'UNFILLED' && live.outcome !== 'UNFILLED') {
+      hasDiscrepancy = true;
+      pairTags.add('Trade Extra (BT Unfilled)');
+    }
+
+    if (mistakeFlags.length > 0) noteDeviationsCount += 1;
+    if (hasDiscrepancy) discrepancyCount += 1;
+    pairTags.forEach(bumpTag);
+
+    const isError = mistakeFlags.length > 0 || hasDiscrepancy;
     events.push({
-      id: tr.id,
-      date: tr.date,
-      entryTime: tr.entryTime ?? '',
+      id: live.id,
+      date: live.date,
+      entryTime: live.entryTime ?? '',
       category: 'live',
-      isError: hasDeviation,
-      createdAt: tr.createdAt,
+      isError,
+      isConsciousSkip: false,
+      createdAt: live.createdAt,
     });
   });
 
-  missedTrades.forEach((tr) => {
-    const reasonNorm = (tr.missedReason ?? '').trim().toLowerCase();
-    const noteFlags = detectNoteFlags(tr.notes);
-    noteFlags.forEach(bumpTag);
+  // 2) Evaluate unmatched Journal Reale trades (Unplanned / Extra trades or explicit mistake notes)
+  sortedLive.forEach((live) => {
+    if (matchedLiveIds.has(live.id)) return;
 
-    const isMarketOnly = MARKET_ONLY_MISSED_REASONS.has(reasonNorm) && noteFlags.length === 0;
-    if (!isMarketOnly) {
-      behavioralMissedCount += 1;
-      if (tr.missedReason?.trim()) {
-        bumpTag(tr.missedReason.trim());
-      } else if (noteFlags.length === 0) {
-        bumpTag('Setup Saltato');
+    if (isConsciousSkipTrade(live)) {
+      registerConsciousSkip(live);
+      events.push({
+        id: live.id,
+        date: live.date,
+        entryTime: live.entryTime ?? '',
+        category: 'live',
+        isError: false,
+        isConsciousSkip: true,
+        createdAt: live.createdAt,
+      });
+      return;
+    }
+
+    const tradeTags = new Set<string>();
+    const mistakeFlags = detectExplicitMistakeFlags(live);
+    mistakeFlags.forEach((f) => tradeTags.add(f));
+
+    const isExtraTrade = hasBacktestBaseline && live.outcome !== 'UNFILLED';
+    if (isExtraTrade) {
+      unplannedExtraCount += 1;
+      tradeTags.add('Trade Extra (Fuori Backtest)');
+    }
+    if (mistakeFlags.length > 0) {
+      noteDeviationsCount += 1;
+    }
+
+    tradeTags.forEach(bumpTag);
+    const isError = isExtraTrade || mistakeFlags.length > 0;
+    events.push({
+      id: live.id,
+      date: live.date,
+      entryTime: live.entryTime ?? '',
+      category: 'live',
+      isError,
+      isConsciousSkip: false,
+      createdAt: live.createdAt,
+    });
+  });
+
+  // Link missedTrades records to unmatched Backtest trades where applicable
+  const linkedMissedIds = new Set<string>();
+
+  // 3) Evaluate unmatched Backtest trades (Unexplained missed Backtest trades)
+  scopedBacktest.forEach((bt) => {
+    if (matchedBtIds.has(bt.id)) return;
+    if (bt.outcome === 'UNFILLED') return;
+
+    // Strict exclusion if Backtest note itself contains a conscious skip keyword
+    if (isConsciousSkipTrade(bt)) {
+      registerConsciousSkip(bt);
+      events.push({
+        id: bt.id,
+        date: bt.date,
+        entryTime: bt.entryTime ?? '',
+        category: 'backtest',
+        isError: false,
+        isConsciousSkip: true,
+        createdAt: bt.createdAt,
+      });
+      return;
+    }
+
+    // Check if there is a corresponding Trade Non Preso record explaining this Backtest trade
+    const btSetup = normSetup(bt.setup);
+    const matchingMissed = sortedMissed.find((m) => {
+      if (linkedMissedIds.has(m.id)) return false;
+      if (m.date !== bt.date || normAsset(m.asset) !== normAsset(bt.asset)) return false;
+      const mSetup = normSetup(m.setup);
+      return !btSetup || !mSetup || btSetup === mSetup;
+    });
+
+    if (matchingMissed) {
+      linkedMissedIds.add(matchingMissed.id);
+
+      if (isConsciousSkipTrade(matchingMissed)) {
+        registerConsciousSkip(matchingMissed);
+        events.push({
+          id: matchingMissed.id,
+          date: matchingMissed.date,
+          entryTime: matchingMissed.entryTime ?? '',
+          category: 'missed',
+          isError: false,
+          isConsciousSkip: true,
+          createdAt: matchingMissed.createdAt,
+        });
+        return;
       }
+
+      const reasonNorm = (matchingMissed.missedReason ?? '').trim().toLowerCase();
+      const noteFlags = detectExplicitMistakeFlags(matchingMissed);
+      const isMarketOnly =
+        MARKET_ONLY_MISSED_REASONS.has(reasonNorm) && noteFlags.length === 0;
+
+      if (isMarketOnly) {
+        events.push({
+          id: matchingMissed.id,
+          date: matchingMissed.date,
+          entryTime: matchingMissed.entryTime ?? '',
+          category: 'missed',
+          isError: false,
+          isConsciousSkip: true,
+          createdAt: matchingMissed.createdAt,
+        });
+        return;
+      }
+
+      behavioralMissedCount += 1;
+      if (noteFlags.length > 0) {
+        noteDeviationsCount += 1;
+        noteFlags.forEach(bumpTag);
+      } else if (matchingMissed.missedReason?.trim()) {
+        bumpTag(matchingMissed.missedReason.trim());
+      } else {
+        bumpTag('Setup BT Non Preso');
+      }
+
+      events.push({
+        id: matchingMissed.id,
+        date: matchingMissed.date,
+        entryTime: matchingMissed.entryTime ?? '',
+        category: 'missed',
+        isError: true,
+        isConsciousSkip: false,
+        createdAt: matchingMissed.createdAt,
+      });
+      return;
+    }
+
+    // No matching Trade Non Preso record: if Live trading is active, it's an unexplained missed Backtest trade
+    if (sortedLive.length > 0) {
+      behavioralMissedCount += 1;
+      bumpTag('Setup BT Non Preso');
+      events.push({
+        id: bt.id,
+        date: bt.date,
+        entryTime: bt.entryTime ?? '',
+        category: 'backtest',
+        isError: true,
+        isConsciousSkip: false,
+        createdAt: bt.createdAt,
+      });
+    }
+  });
+
+  // 4) Evaluate remaining standalone Trade Non Presi entries not linked to a Backtest row
+  sortedMissed.forEach((m) => {
+    if (linkedMissedIds.has(m.id)) return;
+
+    if (isConsciousSkipTrade(m)) {
+      registerConsciousSkip(m);
+      events.push({
+        id: m.id,
+        date: m.date,
+        entryTime: m.entryTime ?? '',
+        category: 'missed',
+        isError: false,
+        isConsciousSkip: true,
+        createdAt: m.createdAt,
+      });
+      return;
+    }
+
+    const reasonNorm = (m.missedReason ?? '').trim().toLowerCase();
+    const noteFlags = detectExplicitMistakeFlags(m);
+    const isMarketOnly =
+      MARKET_ONLY_MISSED_REASONS.has(reasonNorm) && noteFlags.length === 0;
+
+    if (isMarketOnly) {
+      events.push({
+        id: m.id,
+        date: m.date,
+        entryTime: m.entryTime ?? '',
+        category: 'missed',
+        isError: false,
+        isConsciousSkip: true,
+        createdAt: m.createdAt,
+      });
+      return;
+    }
+
+    behavioralMissedCount += 1;
+    if (noteFlags.length > 0) {
+      noteDeviationsCount += 1;
+      noteFlags.forEach(bumpTag);
+    } else if (m.missedReason?.trim()) {
+      bumpTag(m.missedReason.trim());
+    } else {
+      bumpTag('Setup Saltato');
     }
 
     events.push({
-      id: tr.id,
-      date: tr.date,
-      entryTime: tr.entryTime ?? '',
+      id: m.id,
+      date: m.date,
+      entryTime: m.entryTime ?? '',
       category: 'missed',
-      isError: !isMarketOnly,
-      createdAt: tr.createdAt,
+      isError: true,
+      isConsciousSkip: false,
+      createdAt: m.createdAt,
     });
   });
 
-  // Sort chronologically to compute consecutive clean days, last mistake & recent mistake probability
+  // Sort all events chronologically
   events.sort((a, b) => {
     if (a.date !== b.date) return a.date.localeCompare(b.date);
     if (a.entryTime !== b.entryTime) return a.entryTime.localeCompare(b.entryTime);
     return a.createdAt - b.createdAt;
   });
 
-  const dayHasError = new Map<string, boolean>();
+  // Build day status map: conscious skips NEVER break the streak and NEVER mark a day as error
+  const dayStatsMap = new Map<string, { hasError: boolean; hasActiveDecision: boolean }>();
   events.forEach((ev) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(ev.date)) return;
-    const prev = dayHasError.get(ev.date) ?? false;
-    dayHasError.set(ev.date, prev || ev.isError);
+    const prev = dayStatsMap.get(ev.date) ?? { hasError: false, hasActiveDecision: false };
+    dayStatsMap.set(ev.date, {
+      hasError: prev.hasError || ev.isError,
+      hasActiveDecision: prev.hasActiveDecision || !ev.isConsciousSkip,
+    });
   });
 
-  const sortedDays = Array.from(dayHasError.keys()).sort();
+  const sortedActiveDays = Array.from(dayStatsMap.entries())
+    .filter(([, info]) => info.hasError || info.hasActiveDecision)
+    .map(([day]) => day)
+    .sort();
+
   let consecutiveCleanDays = 0;
-  for (const day of sortedDays) {
-    if (dayHasError.get(day)) {
+  for (const day of sortedActiveDays) {
+    const info = dayStatsMap.get(day);
+    if (info?.hasError) {
       consecutiveCleanDays = 0;
-    } else {
+    } else if (info?.hasActiveDecision) {
       consecutiveCleanDays += 1;
     }
   }
 
-  const datedMistakes = events.filter(
-    (ev) => ev.isError && /^\d{4}-\d{2}-\d{2}$/.test(ev.date),
-  );
-  const allMistakes =
-    datedMistakes.length > 0 ? datedMistakes : events.filter((ev) => ev.isError);
+  const errorEvents = events.filter((ev) => ev.isError);
+  const datedMistakes = errorEvents.filter((ev) => /^\d{4}-\d{2}-\d{2}$/.test(ev.date));
+  const allMistakes = datedMistakes.length > 0 ? datedMistakes : errorEvents;
   const latestMistakeEvent =
     allMistakes.length > 0 ? allMistakes[allMistakes.length - 1] : null;
   const lastMistake: LastMistakeInfo | null = latestMistakeEvent
@@ -203,43 +595,36 @@ export function computeDisciplineMetrics(params: {
       }
     : null;
 
-  const unforcedErrorsCount = noteDeviationsCount + behavioralMissedCount;
-  const overallErrorRate = unforcedErrorsCount / Math.max(1, totalEvents);
+  const evaluatedEvents = events.filter((ev) => !ev.isConsciousSkip || ev.isError);
+  const unforcedErrorsCount = errorEvents.length;
+  const totalEvaluated = evaluatedEvents.length;
 
-  // Recent 10-event window weighted more heavily for error risk
-  const recentWindow = events.slice(-10);
+  const errorRate =
+    totalEvaluated > 0 ? unforcedErrorsCount / totalEvaluated : 0;
+  const recentWindow = evaluatedEvents.slice(-10);
   const recentErrorRate =
-    recentWindow.filter((ev) => ev.isError).length / Math.max(1, recentWindow.length);
-
-  // Expectancy drift penalty when Backtest exists for comparison
-  let expectancyGapPenalty = 0;
-  if (backtestTrades.length > 0 && liveTrades.length > 0) {
-    const gapR = backtestStats.expectancyR - liveStats.expectancyR;
-    if (gapR > 0) {
-      expectancyGapPenalty = Math.min(20, gapR * 12);
-    }
-  }
-
-  const missedPenalty = Math.min(45, (behavioralMissedCount / totalEvents) * 65);
-  const notePenalty =
-    liveTrades.length > 0
-      ? Math.min(35, (noteDeviationsCount / liveTrades.length) * 55)
+    recentWindow.length > 0
+      ? recentWindow.filter((ev) => ev.isError).length / recentWindow.length
       : 0;
 
-  const rawScore = 100 - missedPenalty - notePenalty - expectancyGapPenalty;
-  const adherenceScore = Math.max(1, Math.min(100, Math.round(rawScore)));
+  let adherenceScore = 100;
+  if (unforcedErrorsCount > 0 && totalEvaluated > 0) {
+    const penalty = Math.min(95, errorRate * 115 + Math.min(15, unforcedErrorsCount * 2.5));
+    adherenceScore = Math.max(1, Math.min(100, Math.round(100 - penalty)));
+  }
   const emoji = getAdherenceEmoji(adherenceScore);
 
-  const recurringFactor = Array.from(tagCounts.values()).some((c) => c >= 2) ? 6 : 0;
-  const rawMistakeProb =
-    (recentErrorRate * 0.65 + overallErrorRate * 0.35) * 100 +
-    recurringFactor +
-    (expectancyGapPenalty > 8 ? 5 : 0);
-
+  const recurringFactor = Array.from(tagCounts.values()).some((c) => c >= 2) ? 8 : 0;
   const mistakeProbabilityPct =
-    unforcedErrorsCount === 0 && expectancyGapPenalty <= 2
-      ? 5
-      : Math.max(5, Math.min(95, Math.round(rawMistakeProb)));
+    unforcedErrorsCount === 0
+      ? 0
+      : Math.max(
+          5,
+          Math.min(
+            95,
+            Math.round((recentErrorRate * 0.65 + errorRate * 0.35) * 100 + recurringFactor),
+          ),
+        );
 
   const detectedTags = Array.from(tagCounts.entries())
     .map(([label, count]) => ({ label, count }))
@@ -251,11 +636,14 @@ export function computeDisciplineMetrics(params: {
     adherenceScore,
     emoji,
     consecutiveCleanDays,
-    totalTrackedDays: sortedDays.length,
+    totalTrackedDays: sortedActiveDays.length,
     mistakeProbabilityPct,
     unforcedErrorsCount,
     noteDeviationsCount,
     behavioralMissedCount,
+    unplannedExtraCount,
+    discrepancyCount,
+    consciousSkipsExcludedCount,
     detectedTags,
     lastMistake,
   };
@@ -274,24 +662,32 @@ export function buildDisciplineCoachPrompt(input: AiCoachAnalysisInput): string 
     metrics,
   } = input;
 
-  const recentLive = sortTradesChronologically(liveTrades).slice(-15);
-  const recentMissed = sortTradesChronologically(missedTrades).slice(-12);
+  // Exclude intentional conscious skips from error logs passed to the AI Coach
+  const nonSkippedLive = sortTradesChronologically(liveTrades).filter(
+    (tr) => !isConsciousSkipTrade(tr),
+  );
+  const nonSkippedMissed = sortTradesChronologically(missedTrades).filter(
+    (tr) => !isConsciousSkipTrade(tr),
+  );
+
+  const recentLive = nonSkippedLive.slice(-15);
+  const recentMissed = nonSkippedMissed.slice(-12);
 
   const liveNoteRows = recentLive
     .filter((tr) => Boolean(tr.notes?.trim()) || tr.outcome === 'STOP LOSS' || tr.outcome === 'TP')
     .slice(-12)
     .map(
       (tr) =>
-        `- [LIVE] ${tr.date} | ${tr.asset} | ${tr.setup} | ${tr.outcome} (${formatR(tr.netR)})${
-          tr.notes?.trim() ? ` | NOTE: "${tr.notes.trim()}"` : ''
-        }`,
+        `- [LIVE] ${tr.date} | ${tr.asset} | ${tr.setup} (${tr.bias}) | ${tr.outcome} (${formatR(
+          tr.netR,
+        )})${tr.notes?.trim() ? ` | NOTE: "${tr.notes.trim()}"` : ''}`,
     );
 
   const missedNoteRows = recentMissed.map(
     (tr) =>
-      `- [NON PRESO] ${tr.date} | ${tr.asset} | ${tr.setup} | Esito teorico: ${tr.outcome} (${formatR(
-        tr.netR,
-      )}) | Motivo: ${tr.missedReason || 'N/D'}${
+      `- [NON PRESO] ${tr.date} | ${tr.asset} | ${tr.setup} (${tr.bias}) | Esito teorico: ${
+        tr.outcome
+      } (${formatR(tr.netR)}) | Motivo: ${tr.missedReason || 'N/D'}${
         tr.notes?.trim() ? ` | NOTE: "${tr.notes.trim()}"` : ''
       }`,
   );
@@ -306,21 +702,24 @@ export function buildDisciplineCoachPrompt(input: AiCoachAnalysisInput): string 
         : 'Tutto lo Storico Backtest'
     }`,
     '',
-    'METRICHE DISCIPLINA CALCOLATE:',
+    'REGOLA DI ESCLUSIONE RIGIDA: Gli skip consapevoli (CONSAPEVOLE, NON PRESO CONSAPEVOLE, PAUSA LAVORO, FESTIVO) sono già stati esclusi e NON vanno mai trattati come errori.',
+    '',
+    'METRICHE DISCIPLINA CALCOLATE (SOLO ERRORI REALI NON FORZATI):',
     `- Mechanical Adherence Score: ${metrics.adherenceScore}/100 (${metrics.emoji})`,
-    `- Streak Giorni Senza Errori Non Forzati: ${metrics.consecutiveCleanDays} giorni su ${metrics.totalTrackedDays} tracciati`,
+    `- Streak Giorni Senza Errori Non Forzati: ${metrics.consecutiveCleanDays} giorni su ${metrics.totalTrackedDays} attivi`,
     `- Probabilità Stimata Errore Esecutivo: ${metrics.mistakeProbabilityPct}%`,
-    `- Deviazioni nelle NOTE Live: ${metrics.noteDeviationsCount} | Setup persi comportamentali: ${metrics.behavioralMissedCount}`,
+    `- Errori Reali Totali: ${metrics.unforcedErrorsCount} (Non presi non giustificati: ${metrics.behavioralMissedCount} | Trade extra fuori backtest: ${metrics.unplannedExtraCount} | Discrepanze esito/direzione: ${metrics.discrepancyCount} | Note errore esplicito: ${metrics.noteDeviationsCount})`,
+    `- Skip consapevoli esclusi dal calcolo: ${metrics.consciousSkipsExcludedCount}`,
     '',
     'CONFRONTO BACKTEST vs JOURNAL REALE:',
-    `- Backtest: ${backtestStats.totalTrades} trade (${backtestStats.wins} TP, ${backtestStats.losses} SL, ${backtestStats.breakevens} BE, ${backtestStats.unfilled} UF) | WR: ${backtestStats.winRatePct.toFixed(1)}% | Net R: ${formatR(backtestStats.netR)} | Expectancy: ${formatR(backtestStats.expectancyR)} | Max DD: -${backtestStats.maxDrawdownR.toFixed(2)}R`,
-    `- Journal Reale: ${liveStats.totalTrades} trade (${liveStats.wins} TP, ${liveStats.losses} SL, ${liveStats.breakevens} BE, ${liveStats.unfilled} UF) | WR: ${liveStats.winRatePct.toFixed(1)}% | Net R: ${formatR(liveStats.netR)} | Expectancy: ${formatR(liveStats.expectancyR)} | Max DD: -${liveStats.maxDrawdownR.toFixed(2)}R`,
+    `- Backtest: ${backtestStats.totalTrades} trade (${backtestStats.wins} TP, ${backtestStats.losses} SL, ${backtestStats.breakevens} BE, ${backtestStats.unfilled} UF) | WR: ${backtestStats.winRatePct.toFixed(1)}% | Net R: ${formatR(backtestStats.netR)} | Expectancy: ${formatR(backtestStats.avgRExcludingUf)} | Max DD: -${backtestStats.maxDrawdownR.toFixed(2)}R`,
+    `- Journal Reale: ${liveStats.totalTrades} trade (${liveStats.wins} TP, ${liveStats.losses} SL, ${liveStats.breakevens} BE, ${liveStats.unfilled} UF) | WR: ${liveStats.winRatePct.toFixed(1)}% | Net R: ${formatR(liveStats.netR)} | Expectancy: ${formatR(liveStats.avgRExcludingUf)} | Max DD: -${liveStats.maxDrawdownR.toFixed(2)}R`,
     `- Scostamento Live vs Backtest: Net R ${formatR(netRGap)} | Win Rate ${wrGap >= 0 ? '+' : ''}${wrGap.toFixed(1)}%`,
     '',
-    `TRADE NON PRESI (${missedTrades.length} totali nel filtro attivo):`,
-    ...(missedNoteRows.length > 0 ? missedNoteRows : ['- Nessun trade non preso registrato.']),
+    `TRADE NON PRESI NON GIUSTIFICATI (${nonSkippedMissed.length} nel filtro attivo, esclusi skip consapevoli):`,
+    ...(missedNoteRows.length > 0 ? missedNoteRows : ['- Nessun errore comportamentale in Trade Non Presi.']),
     '',
-    'CAMPIONE RECENTE JOURNAL REALE E COLONNA NOTE:',
+    'CAMPIONE RECENTE JOURNAL REALE E COLONNA NOTE (esclusi skip consapevoli):',
     ...(liveNoteRows.length > 0 ? liveNoteRows : ['- Nessun trade reale con note recenti.']),
   ].join('\n');
 }
