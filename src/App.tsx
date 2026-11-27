@@ -35,6 +35,7 @@ import { NewAssetModal } from './components/NewAssetModal';
 import { SetupFilterBar } from './components/SetupFilterBar';
 import { TradeModal } from './components/TradeModal';
 import { TradeTable } from './components/TradeTable';
+import { WeekdayBreakdownCard } from './components/WeekdayBreakdownCard';
 import { auth, signOutFirebase } from './firebase';
 import { TRANSLATIONS } from './i18n/translations';
 import {
@@ -816,6 +817,16 @@ export function App() {
   const dashboardLiveStats = useMemo(
     () => calculatePerformanceStats(visibleDashboardLiveTrades),
     [visibleDashboardLiveTrades],
+  );
+
+  const visibleDashboardCombinedTrades = useMemo(
+    () => [...visibleDashboardBacktestTrades, ...visibleDashboardLiveTrades],
+    [visibleDashboardBacktestTrades, visibleDashboardLiveTrades],
+  );
+
+  const dashboardCombinedStats = useMemo(
+    () => calculatePerformanceStats(visibleDashboardCombinedTrades),
+    [visibleDashboardCombinedTrades],
   );
 
   // Portfolio Rotation Alert: monitor unselected Backtest assets over the last 30 days
@@ -2611,7 +2622,7 @@ export function App() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
                 <div className="rounded-lg border border-[#1E2634] bg-[#121721] p-5">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-medium text-slate-400">
@@ -2736,6 +2747,56 @@ export function App() {
                     );
                   })()}
                 </div>
+
+                <div className="rounded-lg border border-sky-500/45 bg-gradient-to-b from-sky-500/[0.08] to-[#121721] p-5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-sky-300">
+                      {lang === 'en'
+                        ? 'Avg R (excl. UF) · Combined'
+                        : lang === 'es'
+                          ? 'Avg R (sin UF) · Combinado'
+                          : 'Avg R (escl. UF) · Combinato'}
+                    </span>
+                    <span className="font-mono text-[10px] text-slate-400">
+                      {lang === 'en'
+                        ? 'Backtest + Live'
+                        : lang === 'es'
+                          ? 'Backtest + Real'
+                          : 'Backtest + Reale'}
+                    </span>
+                  </div>
+                  <div
+                    className={`mt-2 font-mono text-2xl font-bold tabular-nums ${
+                      dashboardCombinedStats.avgRExcludingUf > 0
+                        ? 'text-emerald-400'
+                        : dashboardCombinedStats.avgRExcludingUf < 0
+                          ? 'text-rose-400'
+                          : 'text-slate-100'
+                    }`}
+                  >
+                    {formatR(dashboardCombinedStats.avgRExcludingUf)}
+                  </div>
+                  <div className="mt-1.5 font-mono text-xs text-slate-300 tabular-nums">
+                    {dashboardCombinedStats.executedTradesCount}{' '}
+                    {lang === 'en'
+                      ? 'exec.'
+                      : lang === 'es'
+                        ? 'ejec.'
+                        : 'eseg.'}{' '}
+                    · {dashboardCombinedStats.unfilled} UF{' '}
+                    {lang === 'en'
+                      ? 'excl.'
+                      : lang === 'es'
+                        ? 'excl.'
+                        : 'escl.'}{' '}
+                    · Net: {formatR(dashboardCombinedStats.netR)}
+                  </div>
+                  <div className="mt-1 font-mono text-[11px] text-slate-400 tabular-nums">
+                    BT: {formatR(dashboardBacktestStats.avgRExcludingUf)} ·{' '}
+                    {lang === 'en' ? 'Live' : lang === 'es' ? 'Real' : 'Reale'}:{' '}
+                    {formatR(dashboardLiveStats.avgRExcludingUf)}
+                  </div>
+                </div>
               </div>
             </section>
 
@@ -2788,6 +2849,20 @@ export function App() {
                 color: '#38BDF8',
                 stats: dashboardLiveStats,
               }}
+            />
+
+            {/* Compact Mon-Fri Breakdown (Combined Backtest + Live Data) */}
+            <WeekdayBreakdownCard
+              trades={visibleDashboardCombinedTrades}
+              lang={lang}
+              subtitle={
+                lang === 'en'
+                  ? 'Combined Backtest + Live Journaling performance by trading day (Avg R & Win Rate exclude UF).'
+                  : lang === 'es'
+                    ? 'Rendimiento combinado Backtest + Live por día operativo (Avg R y Win Rate excluyen UF).'
+                    : 'Performance combinata Backtest + Journal Reale per giorno operativo (Avg R e Win Rate escludono UF).'
+              }
+              emptyMessage={t.dashboard.noEquityData}
             />
 
             {/* Comparison Matrix Table */}
@@ -3039,14 +3114,43 @@ export function App() {
                   {formatPct(backtestStats.netReturnPct)}
                 </div>
               </div>
-              <div className="rounded-lg border border-[#1E2634] bg-[#121721] p-5">
-                <div className="text-xs font-medium text-slate-400">
-                  {t.journal.avgExpectancy}
+              <div className="rounded-lg border border-emerald-500/45 bg-gradient-to-b from-emerald-500/[0.08] to-[#121721] p-5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-emerald-300">
+                    {lang === 'en'
+                      ? 'Avg R (excl. UF)'
+                      : lang === 'es'
+                        ? 'Avg R (sin UF)'
+                        : 'Avg R (escl. UF)'}
+                  </span>
+                  <span className="font-mono text-[10px] text-slate-400 tabular-nums">
+                    {backtestStats.executedTradesCount}{' '}
+                    {lang === 'en'
+                      ? 'exec.'
+                      : lang === 'es'
+                        ? 'ejec.'
+                        : 'eseg.'}
+                  </span>
                 </div>
-                <div className="mt-2 font-mono text-2xl font-bold text-slate-100 tabular-nums">
-                  {formatR(backtestStats.expectancyR)}
+                <div
+                  className={`mt-2 font-mono text-2xl font-bold tabular-nums ${
+                    backtestStats.avgRExcludingUf > 0
+                      ? 'text-emerald-400'
+                      : backtestStats.avgRExcludingUf < 0
+                        ? 'text-rose-400'
+                        : 'text-slate-100'
+                  }`}
+                >
+                  {formatR(backtestStats.avgRExcludingUf)}
                 </div>
-                <div className="mt-1.5 font-mono text-xs text-rose-400 tabular-nums">
+                <div className="mt-1.5 font-mono text-xs text-slate-300 tabular-nums">
+                  {lang === 'en'
+                    ? `Incl. UF: ${formatR(backtestStats.expectancyR)} · ${backtestStats.unfilled} UF excl.`
+                    : lang === 'es'
+                      ? `Incl. UF: ${formatR(backtestStats.expectancyR)} · ${backtestStats.unfilled} UF excl.`
+                      : `Incl. UF: ${formatR(backtestStats.expectancyR)} · ${backtestStats.unfilled} UF escl.`}
+                </div>
+                <div className="mt-1 font-mono text-[11px] text-rose-400 tabular-nums">
                   Max DD: -{backtestStats.maxDrawdownR.toFixed(2)} R
                 </div>
               </div>
@@ -3061,6 +3165,19 @@ export function App() {
                 color: '#10B981',
                 stats: backtestStats,
               }}
+            />
+
+            <WeekdayBreakdownCard
+              trades={dashboardPortfolioBacktest}
+              lang={lang}
+              subtitle={
+                lang === 'en'
+                  ? `Backtest performance by trading day (${selectedSetup}${assetFilter !== 'ALL' ? ` · ${assetFilter}` : ''} · Avg R & Win Rate exclude UF).`
+                  : lang === 'es'
+                    ? `Rendimiento Backtest por día operativo (${selectedSetup}${assetFilter !== 'ALL' ? ` · ${assetFilter}` : ''} · Avg R y Win Rate excluyen UF).`
+                    : `Performance Backtest per giorno operativo (${selectedSetup}${assetFilter !== 'ALL' ? ` · ${assetFilter}` : ''} · Avg R e Win Rate escludono UF).`
+              }
+              emptyMessage={t.journal.emptyBacktest}
             />
 
             <DrawdownChart

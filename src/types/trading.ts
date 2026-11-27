@@ -94,8 +94,31 @@ export interface PeriodRPoint {
   tradesCount: number;
 }
 
+export type WeekdayPerformanceStatus =
+  | 'top'
+  | 'worst'
+  | 'underperforming'
+  | 'lowest'
+  | 'neutral'
+  | 'empty';
+
+export interface WeekdayBreakdownItem {
+  dayIndex: 1 | 2 | 3 | 4 | 5; // 1=Mon .. 5=Fri
+  totalTrades: number;
+  executedTrades: number;
+  wins: number;
+  losses: number;
+  breakevens: number;
+  unfilled: number;
+  netR: number;
+  avgR: number; // Average R excluding UNFILLED
+  winRatePct: number;
+  status: WeekdayPerformanceStatus;
+}
+
 export interface PerformanceStats {
   totalTrades: number;
+  executedTradesCount: number;
   wins: number;
   losses: number;
   breakevens: number;
@@ -112,6 +135,7 @@ export interface PerformanceStats {
   maxConsecutiveWins: number;
   maxConsecutiveLosses: number;
   expectancyR: number;
+  avgRExcludingUf: number;
   netReturnPct: number;
   profitFactor: number;
   profitFactorInfinite: boolean;

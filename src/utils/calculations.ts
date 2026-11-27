@@ -8,6 +8,8 @@ import {
   type PerformanceStats,
   type PeriodRPoint,
   type TradeRecord,
+  type WeekdayBreakdownItem,
+  type WeekdayPerformanceStatus,
   type WeeklyAssetSummary,
 } from '../types/trading';
 
@@ -265,6 +267,7 @@ export function calculatePerformanceStats(trades: TradeRecord[]): PerformanceSta
   let breakevens = 0;
   let unfilled = 0;
   let netR = 0;
+  let executedNetR = 0;
   let netReturnPct = 0;
   let grossWinR = 0;
   let grossLossR = 0;
@@ -306,6 +309,9 @@ export function calculatePerformanceStats(trades: TradeRecord[]): PerformanceSta
     else breakevens += 1;
 
     const deltaR = Number.isFinite(trade.netR) ? trade.netR : 0;
+    if (trade.outcome !== 'UNFILLED') {
+      executedNetR += deltaR;
+    }
     const retPct = Number.isFinite(trade.netReturnPct)
       ? trade.netReturnPct
       : deltaR * (trade.riskPct || 1);
@@ -380,6 +386,8 @@ export function calculatePerformanceStats(trades: TradeRecord[]): PerformanceSta
   const totalTrades = ordered.length;
   const winRatePct = executedRelevant > 0 ? roundTo((wins / executedRelevant) * 100, 1) : 0;
   const expectancyR = totalTrades > 0 ? roundTo(netR / totalTrades, 2) : 0;
+  const avgRExcludingUf =
+    executedRelevant > 0 ? roundTo(executedNetR / executedRelevant, 2) : 0;
 
   const grossWinRounded = roundTo(grossWinR, 2);
   const grossLossRounded = roundTo(grossLossR, 2);
@@ -501,6 +509,7 @@ export function calculatePerformanceStats(trades: TradeRecord[]): PerformanceSta
 
   return {
     totalTrades,
+    executedTradesCount: executedRelevant,
     wins,
     losses,
     breakevens,
@@ -517,6 +526,7 @@ export function calculatePerformanceStats(trades: TradeRecord[]): PerformanceSta
     maxConsecutiveWins,
     maxConsecutiveLosses,
     expectancyR,
+    avgRExcludingUf,
     netReturnPct,
     profitFactor,
     profitFactorInfinite,
@@ -978,5 +988,114 @@ export function calculateMaxDrawdownPeriod(
     durationDays,
     isRecovered: Boolean(recoveryDate),
   };
+}
+
+export function calculateWeekdayBreakdown(
+  trades: TradeRecord[],
+): WeekdayBreakdownItem[] {
+  const weekdays: (1 | 2 | 3 | 4 | 5)[] = [1, 2, 3, 4, 5];
+
+  interface DayAcc {
+    dayIndex: 1 | 2 | 3 | 4 | 5;
+    totalTrades: number;
+    executedTrades: number;
+    wins: number;
+    losses: number;
+    breakevens: number;
+    unfilled: number;
+    netR: number;
+    executedNetR: number;
+  }
+
+  const accMap = new Map<1 | 2 | 3 | 4 | 5, DayAcc>();
+  weekdays.forEach((d) => {
+    accMap.set(d, {
+      dayIndex: d,
+      totalTrades: 0,
+      executedTrades: 0,
+      wins: 0,
+      losses: 0,
+      breakevens: 0,
+      unfilled: 0,
+      netR: 0,
+      executedNetR: 0,
+    });
+  });
+
+  trades.forEach((trade) => {
+    const dt = parseIsoDateUtc(trade.date);
+    if (!dt) return;
+    const wd = dt.getUTCDay();
+    if (wd < 1 || wd > 5) return;
+    const acc = accMap.get(wd as 1 | 2 | 3 | 4 | 5);
+    if (!acc) return;
+
+    const r = Number.isFinite(trade.netR) ? trade.netR : 0;
+    acc.totalTrades += 1;
+    acc.netR = roundTo(acc.netR + r, 2);
+
+    if (trade.outcome === 'UNFILLED') {
+      acc.unfilled += 1;
+      return;
+    }
+
+    acc.executedTrades += 1;
+    acc.executedNetR = roundTo(acc.executedNetR + r, 2);
+    if (trade.outcome === 'TP') acc.wins += 1;
+    else if (trade.outcome === 'STOP LOSS') acc.losses += 1;
+    else acc.breakevens += 1;
+  });
+
+  const baseItems = weekdays.map((d) => {
+    const acc = accMap.get(d)!;
+    const avgR =
+      acc.executedTrades > 0 ? roundTo(acc.executedNetR / acc.executedTrades, 2) : 0;
+    const winRatePct =
+      acc.executedTrades > 0 ? roundTo((acc.wins / acc.executedTrades) * 100, 1) : 0;
+    return {
+      dayIndex: acc.dayIndex,
+      totalTrades: acc.totalTrades,
+      executedTrades: acc.executedTrades,
+      wins: acc.wins,
+      losses: acc.losses,
+      breakevens: acc.breakevens,
+      unfilled: acc.unfilled,
+      netR: roundTo(acc.netR, 2),
+      avgR,
+      winRatePct,
+    };
+  });
+
+  const activeItems = baseItems.filter((item) => item.executedTrades > 0);
+  const maxNetR =
+    activeItems.length > 0 ? Math.max(...activeItems.map((i) => i.netR)) : 0;
+  const minNetR =
+    activeItems.length > 0 ? Math.min(...activeItems.map((i) => i.netR)) : 0;
+
+  return baseItems.map((item) => {
+    let status: WeekdayPerformanceStatus = 'neutral';
+    if (item.totalTrades === 0) {
+      status = 'empty';
+    } else if (item.executedTrades === 0) {
+      status = 'neutral';
+    } else if (maxNetR > 0 && item.netR === maxNetR) {
+      status = 'top';
+    } else if (minNetR < 0 && item.netR === minNetR) {
+      status = 'worst';
+    } else if (item.netR < 0) {
+      status = 'underperforming';
+    } else if (
+      activeItems.length >= 2 &&
+      minNetR < maxNetR &&
+      item.netR === minNetR
+    ) {
+      status = 'lowest';
+    }
+
+    return {
+      ...item,
+      status,
+    };
+  });
 }
 
