@@ -302,22 +302,26 @@ export function WeekdayBreakdownCard({
                   key={item.dayIndex}
                   className={`px-4 py-3.5 transition-colors ${getCellSurfaceClass(item)}`}
                 >
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+                      <span
                         className={`text-xs font-semibold ${
                           isEmpty ? 'text-slate-500' : 'text-slate-100'
                         }`}
                       >
                         {fullNames[item.dayIndex]}
-                      </div>
+                      </span>
                       {!isEmpty ? (
-                        <div className="mt-0.5 font-mono text-[11px] font-medium text-slate-300 tabular-nums whitespace-nowrap">
+                        <span className="font-mono text-[11px] font-semibold text-slate-200 tabular-nums whitespace-nowrap">
                           {item.executedTrades} {copy.executedShort}
-                        </div>
+                        </span>
                       ) : null}
                     </div>
-                    {renderStatusBadge(item)}
+                    {!isEmpty ? (
+                      <div className="min-h-[16px] flex items-center">
+                        {renderStatusBadge(item)}
+                      </div>
+                    ) : null}
                   </div>
 
                   {isEmpty ? (
