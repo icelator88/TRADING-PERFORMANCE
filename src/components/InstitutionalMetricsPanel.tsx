@@ -273,6 +273,8 @@ export function InstitutionalMetricsPanel({
     displayLabel: string;
     netR: number;
     tradesCount: number;
+    comparisonNetR?: number | null;
+    comparisonTradesCount?: number;
   } | null>(null);
 
   const l = lang === 'en' ? LABELS.en : LABELS.it;
@@ -280,9 +282,40 @@ export function InstitutionalMetricsPanel({
   const primaryFmt = formatStatsDisplay(stats, isComparison);
   const compFmt = comparisonStats ? formatStatsDisplay(comparisonStats, true) : null;
 
-  const buckets = pnlMode === 'monthly' ? stats.monthlyBuckets : stats.dailyBuckets;
-  const visibleBuckets = pnlMode === 'monthly' ? buckets : buckets.slice(-45);
-  const maxAbsR = Math.max(1, ...visibleBuckets.map((b) => Math.abs(b.netR)));
+  const primaryBuckets = pnlMode === 'monthly' ? stats.monthlyBuckets : stats.dailyBuckets;
+  const compBuckets = comparisonStats
+    ? pnlMode === 'monthly'
+      ? comparisonStats.monthlyBuckets
+      : comparisonStats.dailyBuckets
+    : [];
+
+  const mergedBuckets = (() => {
+    const primaryMap = new Map(primaryBuckets.map((b) => [b.period, b]));
+    const compMap = new Map(compBuckets.map((b) => [b.period, b]));
+    const allPeriods = Array.from(
+      new Set([...primaryMap.keys(), ...compMap.keys()]),
+    ).sort((a, b) => a.localeCompare(b));
+
+    return allPeriods.map((period) => {
+      const p = primaryMap.get(period) ?? null;
+      const c = compMap.get(period) ?? null;
+      return {
+        period,
+        primary: p,
+        comparison: c,
+      };
+    });
+  })();
+
+  const visibleMerged =
+    pnlMode === 'monthly' ? mergedBuckets : mergedBuckets.slice(-45);
+  const maxAbsR = Math.max(
+    1,
+    ...visibleMerged.flatMap((item) => [
+      Math.abs(item.primary?.netR ?? 0),
+      Math.abs(item.comparison?.netR ?? 0),
+    ]),
+  );
 
   const renderColumnHeaders = () => {
     if (!isComparison) return null;
@@ -864,16 +897,50 @@ export function InstitutionalMetricsPanel({
             {hoveredPeriod ? (
               <div className="rounded border border-[#263042] bg-[#0B0E14] px-2.5 py-1 font-mono text-xs tabular-nums">
                 <span className="text-slate-300">{hoveredPeriod.displayLabel}: </span>
-                <span
-                  className={
-                    hoveredPeriod.netR >= 0 ? 'font-bold text-emerald-400' : 'font-bold text-rose-400'
-                  }
-                >
-                  {formatR(hoveredPeriod.netR)}
-                </span>
-                <span className="ml-2 text-slate-500">
-                  ({hoveredPeriod.tradesCount} {l.tradesLabel})
-                </span>
+                {isComparison ? (
+                  <>
+                    <span className="text-slate-400">{primaryLabel} </span>
+                    <span
+                      className={
+                        hoveredPeriod.tradesCount === 0
+                          ? 'text-slate-500'
+                          : hoveredPeriod.netR >= 0
+                            ? 'font-bold text-emerald-400'
+                            : 'font-bold text-rose-400'
+                      }
+                    >
+                      {hoveredPeriod.tradesCount > 0 ? formatR(hoveredPeriod.netR) : '—'}
+                    </span>
+                    <span className="mx-1.5 text-slate-600">·</span>
+                    <span className="text-slate-400">{comparisonLabel} </span>
+                    <span
+                      className={
+                        (hoveredPeriod.comparisonTradesCount ?? 0) > 0
+                          ? 'font-bold text-[#60A5FA]'
+                          : 'text-slate-500'
+                      }
+                    >
+                      {(hoveredPeriod.comparisonTradesCount ?? 0) > 0 &&
+                      hoveredPeriod.comparisonNetR !== null &&
+                      hoveredPeriod.comparisonNetR !== undefined
+                        ? formatR(hoveredPeriod.comparisonNetR)
+                        : '—'}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span
+                      className={
+                        hoveredPeriod.netR >= 0 ? 'font-bold text-emerald-400' : 'font-bold text-rose-400'
+                      }
+                    >
+                      {formatR(hoveredPeriod.netR)}
+                    </span>
+                    <span className="ml-2 text-slate-500">
+                      ({hoveredPeriod.tradesCount} {l.tradesLabel})
+                    </span>
+                  </>
+                )}
               </div>
             ) : null}
 
@@ -908,7 +975,27 @@ export function InstitutionalMetricsPanel({
           </div>
         </div>
 
-        {visibleBuckets.length === 0 ? (
+        {/* Compact Top-Left Legend when comparing Backtest vs Journal Reale */}
+        {isComparison ? (
+          <div className="mb-3 flex flex-wrap items-center gap-4 text-[11px] font-medium text-slate-300">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-flex h-2.5 w-3 overflow-hidden rounded-xs">
+                <span className="h-full w-1/2 bg-emerald-500" />
+                <span className="h-full w-1/2 bg-rose-500" />
+              </span>
+              <span>{primaryLabel}</span>
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span
+                className="inline-block h-2.5 w-2.5 rounded-xs"
+                style={{ backgroundColor: '#3B82F6' }}
+              />
+              <span>{comparisonLabel}</span>
+            </span>
+          </div>
+        ) : null}
+
+        {visibleMerged.length === 0 ? (
           <div className="flex h-36 items-center justify-center rounded-md border border-dashed border-[#263042] bg-[#0B0E14]/70 text-xs text-slate-400">
             {l.emptyPnl}
           </div>
@@ -917,57 +1004,149 @@ export function InstitutionalMetricsPanel({
             <div
               className="relative pt-2 pb-1"
               style={{
-                minWidth: `${Math.max(460, visibleBuckets.length * 64)}px`,
+                minWidth: `${Math.max(460, visibleMerged.length * (isComparison ? 84 : 64))}px`,
               }}
             >
               <div className="relative flex h-44 items-stretch gap-2">
                 {/* Zero baseline */}
                 <div className="pointer-events-none absolute inset-x-0 top-1/2 border-t border-dashed border-slate-600/70" />
 
-                {visibleBuckets.map((b) => {
-                  const pct = Math.max(10, Math.round((Math.abs(b.netR) / maxAbsR) * 86));
-                  const positive = b.netR >= 0;
-                  const formatted = formatPeriodLabels(b.period, pnlMode, lang);
+                {visibleMerged.map((item) => {
+                  const p = item.primary;
+                  const c = item.comparison;
+                  const formatted = formatPeriodLabels(item.period, pnlMode, lang);
+
+                  if (!isComparison && p) {
+                    const pct = Math.max(10, Math.round((Math.abs(p.netR) / maxAbsR) * 82));
+                    const positive = p.netR >= 0;
+                    return (
+                      <div
+                        key={item.period}
+                        onMouseEnter={() =>
+                          setHoveredPeriod({
+                            ...p,
+                            displayLabel: formatted.full,
+                          })
+                        }
+                        onMouseLeave={() => setHoveredPeriod(null)}
+                        className="group relative flex flex-1 min-w-[56px] flex-col cursor-pointer"
+                      >
+                        <div className="flex flex-1 flex-col items-center justify-end pb-0.5">
+                          {positive ? (
+                            <>
+                              <span className="mb-0.5 font-mono text-[10px] text-emerald-400 tabular-nums">
+                                {p.netR > 0 ? `+${p.netR.toFixed(1)}` : '0.0'}
+                              </span>
+                              <div
+                                style={{ height: `${pct}%` }}
+                                className="w-full max-w-[32px] rounded-t bg-emerald-500/85 transition-opacity group-hover:opacity-80"
+                              />
+                            </>
+                          ) : null}
+                        </div>
+
+                        <div className="flex flex-1 flex-col items-center justify-start pt-0.5">
+                          {!positive ? (
+                            <>
+                              <div
+                                style={{ height: `${pct}%` }}
+                                className="w-full max-w-[32px] rounded-b bg-rose-500/85 transition-opacity group-hover:opacity-80"
+                              />
+                              <span className="mt-0.5 font-mono text-[10px] text-rose-400 tabular-nums">
+                                {p.netR.toFixed(1)}
+                              </span>
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  const hasP = p !== null && p.tradesCount > 0;
+                  const hasC = c !== null && c.tradesCount > 0;
+                  const pVal = p?.netR ?? 0;
+                  const cVal = c?.netR ?? 0;
+                  const pPct = Math.max(8, Math.round((Math.abs(pVal) / maxAbsR) * 80));
+                  const cPct = Math.max(8, Math.round((Math.abs(cVal) / maxAbsR) * 80));
+                  const pPos = pVal >= 0;
+                  const cPos = cVal >= 0;
+
                   return (
                     <div
-                      key={b.period}
+                      key={item.period}
                       onMouseEnter={() =>
                         setHoveredPeriod({
-                          ...b,
+                          period: item.period,
                           displayLabel: formatted.full,
+                          netR: pVal,
+                          tradesCount: p?.tradesCount ?? 0,
+                          comparisonNetR: hasC ? cVal : null,
+                          comparisonTradesCount: c?.tradesCount ?? 0,
                         })
                       }
                       onMouseLeave={() => setHoveredPeriod(null)}
-                      className="group relative flex flex-1 min-w-[56px] flex-col cursor-pointer"
+                      className="group relative flex flex-1 min-w-[76px] flex-col cursor-pointer"
                     >
-                      {/* Top half: Positive bars */}
-                      <div className="flex flex-1 flex-col items-center justify-end pb-0.5">
-                        {positive ? (
-                          <>
-                            <span className="mb-0.5 font-mono text-[10px] text-emerald-400 tabular-nums">
-                              {b.netR > 0 ? `+${b.netR.toFixed(1)}` : '0.0'}
-                            </span>
-                            <div
-                              style={{ height: `${pct}%` }}
-                              className="w-full max-w-[32px] rounded-t bg-emerald-500/85 transition-opacity group-hover:opacity-80"
-                            />
-                          </>
-                        ) : null}
+                      {/* Top half: Positive grouped bars */}
+                      <div className="flex flex-1 items-end justify-center gap-1 pb-0.5">
+                        <div className="flex h-full flex-1 flex-col items-center justify-end">
+                          {hasP && pPos ? (
+                            <>
+                              <span className="mb-0.5 font-mono text-[10px] text-emerald-400 tabular-nums whitespace-nowrap">
+                                {pVal > 0 ? `+${pVal.toFixed(1)}` : '0.0'}
+                              </span>
+                              <div
+                                style={{ height: `${pPct}%` }}
+                                className="w-full max-w-[22px] rounded-t bg-emerald-500/85 transition-opacity group-hover:opacity-85"
+                              />
+                            </>
+                          ) : null}
+                        </div>
+
+                        <div className="flex h-full flex-1 flex-col items-center justify-end">
+                          {hasC && cPos ? (
+                            <>
+                              <span className="mb-0.5 font-mono text-[10px] text-[#60A5FA] tabular-nums whitespace-nowrap">
+                                {cVal > 0 ? `+${cVal.toFixed(1)}` : '0.0'}
+                              </span>
+                              <div
+                                style={{ height: `${cPct}%`, backgroundColor: '#3B82F6' }}
+                                className="w-full max-w-[22px] rounded-t opacity-90 transition-opacity group-hover:opacity-100"
+                              />
+                            </>
+                          ) : null}
+                        </div>
                       </div>
 
-                      {/* Bottom half: Negative bars */}
-                      <div className="flex flex-1 flex-col items-center justify-start pt-0.5">
-                        {!positive ? (
-                          <>
-                            <div
-                              style={{ height: `${pct}%` }}
-                              className="w-full max-w-[32px] rounded-b bg-rose-500/85 transition-opacity group-hover:opacity-80"
-                            />
-                            <span className="mt-0.5 font-mono text-[10px] text-rose-400 tabular-nums">
-                              {b.netR.toFixed(1)}
-                            </span>
-                          </>
-                        ) : null}
+                      {/* Bottom half: Negative grouped bars */}
+                      <div className="flex flex-1 items-start justify-center gap-1 pt-0.5">
+                        <div className="flex h-full flex-1 flex-col items-center justify-start">
+                          {hasP && !pPos ? (
+                            <>
+                              <div
+                                style={{ height: `${pPct}%` }}
+                                className="w-full max-w-[22px] rounded-b bg-rose-500/85 transition-opacity group-hover:opacity-85"
+                              />
+                              <span className="mt-0.5 font-mono text-[10px] text-rose-400 tabular-nums whitespace-nowrap">
+                                {pVal.toFixed(1)}
+                              </span>
+                            </>
+                          ) : null}
+                        </div>
+
+                        <div className="flex h-full flex-1 flex-col items-center justify-start">
+                          {hasC && !cPos ? (
+                            <>
+                              <div
+                                style={{ height: `${cPct}%`, backgroundColor: '#3B82F6' }}
+                                className="w-full max-w-[22px] rounded-b opacity-90 transition-opacity group-hover:opacity-100"
+                              />
+                              <span className="mt-0.5 font-mono text-[10px] text-[#60A5FA] tabular-nums whitespace-nowrap">
+                                {cVal.toFixed(1)}
+                              </span>
+                            </>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
                   );
@@ -976,13 +1155,15 @@ export function InstitutionalMetricsPanel({
 
               {/* X-axis period labels */}
               <div className="mt-2 flex gap-2 border-t border-[#1E2634] pt-2">
-                {visibleBuckets.map((b) => {
-                  const formatted = formatPeriodLabels(b.period, pnlMode, lang);
+                {visibleMerged.map((item) => {
+                  const formatted = formatPeriodLabels(item.period, pnlMode, lang);
                   return (
                     <div
-                      key={`lbl_${b.period}`}
+                      key={`lbl_${item.period}`}
                       title={formatted.full}
-                      className="flex flex-1 min-w-[56px] flex-col items-center text-center font-mono text-[10px] leading-tight text-slate-300 whitespace-nowrap"
+                      className={`flex flex-1 ${
+                        isComparison ? 'min-w-[76px]' : 'min-w-[56px]'
+                      } flex-col items-center text-center font-mono text-[10px] leading-tight text-slate-300 whitespace-nowrap`}
                     >
                       <span>{formatted.primary}</span>
                       {formatted.secondary ? (
