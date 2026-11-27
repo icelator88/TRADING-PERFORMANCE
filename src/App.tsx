@@ -824,11 +824,6 @@ export function App() {
     [visibleDashboardBacktestTrades, visibleDashboardLiveTrades],
   );
 
-  const dashboardCombinedStats = useMemo(
-    () => calculatePerformanceStats(visibleDashboardCombinedTrades),
-    [visibleDashboardCombinedTrades],
-  );
-
   // Portfolio Rotation Alert: monitor unselected Backtest assets over the last 30 days
   const portfolioRotationAlert = useMemo(() => {
     if (backtestOnlyAssets.length === 0) return null;
@@ -2748,55 +2743,85 @@ export function App() {
                   })()}
                 </div>
 
-                <div className="rounded-lg border border-sky-500/45 bg-gradient-to-b from-sky-500/[0.08] to-[#121721] p-5">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-semibold text-sky-300">
-                      {lang === 'en'
-                        ? 'Avg R (excl. UF) · Combined'
-                        : lang === 'es'
-                          ? 'Avg R (sin UF) · Combinado'
-                          : 'Avg R (escl. UF) · Combinato'}
-                    </span>
-                    <span className="font-mono text-[10px] text-slate-400">
-                      {lang === 'en'
-                        ? 'Backtest + Live'
-                        : lang === 'es'
-                          ? 'Backtest + Real'
-                          : 'Backtest + Reale'}
-                    </span>
-                  </div>
-                  <div
-                    className={`mt-2 font-mono text-2xl font-bold tabular-nums ${
-                      dashboardCombinedStats.avgRExcludingUf > 0
-                        ? 'text-emerald-400'
-                        : dashboardCombinedStats.avgRExcludingUf < 0
-                          ? 'text-rose-400'
-                          : 'text-slate-100'
-                    }`}
-                  >
-                    {formatR(dashboardCombinedStats.avgRExcludingUf)}
-                  </div>
-                  <div className="mt-1.5 font-mono text-xs text-slate-300 tabular-nums">
-                    {dashboardCombinedStats.executedTradesCount}{' '}
-                    {lang === 'en'
-                      ? 'exec.'
-                      : lang === 'es'
-                        ? 'ejec.'
-                        : 'eseg.'}{' '}
-                    · {dashboardCombinedStats.unfilled} UF{' '}
-                    {lang === 'en'
-                      ? 'excl.'
-                      : lang === 'es'
-                        ? 'excl.'
-                        : 'escl.'}{' '}
-                    · Net: {formatR(dashboardCombinedStats.netR)}
-                  </div>
-                  <div className="mt-1 font-mono text-[11px] text-slate-400 tabular-nums">
-                    BT: {formatR(dashboardBacktestStats.avgRExcludingUf)} ·{' '}
-                    {lang === 'en' ? 'Live' : lang === 'es' ? 'Real' : 'Reale'}:{' '}
-                    {formatR(dashboardLiveStats.avgRExcludingUf)}
-                  </div>
-                </div>
+                {(() => {
+                  const btExecuted = dashboardBacktestStats.executedTradesCount;
+                  const btNetExpectancy = dashboardBacktestStats.avgRExcludingUf;
+                  const btWinPct = dashboardBacktestStats.winRatePct;
+                  const btLossPct =
+                    btExecuted > 0
+                      ? roundTo((dashboardBacktestStats.losses / btExecuted) * 100, 1)
+                      : 0;
+                  const btAvgWinR = dashboardBacktestStats.avgWinR;
+                  const btAvgLossR = dashboardBacktestStats.avgLossR;
+                  const btPfText = dashboardBacktestStats.profitFactorInfinite
+                    ? '∞'
+                    : dashboardBacktestStats.profitFactor.toFixed(2);
+
+                  return (
+                    <div className="rounded-lg border border-sky-500/45 bg-gradient-to-b from-sky-500/[0.08] to-[#121721] p-5">
+                      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                        <span className="text-xs font-semibold text-sky-300">
+                          {lang === 'en'
+                            ? 'Math Expectancy · Backtest Only'
+                            : lang === 'es'
+                              ? 'Esperanza Matemática · Solo Backtest'
+                              : 'Expectancy Matematica · Solo Backtest'}
+                        </span>
+                        <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-emerald-300 whitespace-nowrap">
+                          {lang === 'en'
+                            ? 'Backtest Only (Benchmark)'
+                            : lang === 'es'
+                              ? 'Solo Backtest (Benchmark)'
+                              : 'Solo Backtest (Benchmark)'}
+                        </span>
+                      </div>
+                      <div className="mt-2 flex items-baseline gap-1.5">
+                        <span
+                          className={`font-mono text-2xl font-bold tabular-nums ${
+                            btNetExpectancy > 0
+                              ? 'text-emerald-400'
+                              : btNetExpectancy < 0
+                                ? 'text-rose-400'
+                                : 'text-slate-100'
+                          }`}
+                        >
+                          {formatR(btNetExpectancy)}
+                        </span>
+                        <span className="font-mono text-[11px] text-slate-400">
+                          {lang === 'en'
+                            ? '/ exec. trade'
+                            : lang === 'es'
+                              ? '/ trade ejec.'
+                              : '/ trade eseg.'}
+                        </span>
+                      </div>
+                      <div className="mt-1.5 font-mono text-[11px] text-slate-300 tabular-nums">
+                        <span className="text-emerald-300">
+                          ({btWinPct.toFixed(1)}% × +{btAvgWinR.toFixed(2)}R)
+                        </span>{' '}
+                        <span className="text-slate-500">−</span>{' '}
+                        <span className="text-rose-300">
+                          ({btLossPct.toFixed(1)}% × {btAvgLossR.toFixed(2)}R)
+                        </span>
+                      </div>
+                      <div className="mt-1 font-mono text-[11px] text-slate-400 tabular-nums">
+                        {btExecuted}{' '}
+                        {lang === 'en'
+                          ? 'exec.'
+                          : lang === 'es'
+                            ? 'ejec.'
+                            : 'eseg.'}{' '}
+                        {lang === 'en'
+                          ? '(excl. UF)'
+                          : lang === 'es'
+                            ? '(sin UF)'
+                            : '(escl. UF)'}{' '}
+                        · WR {btWinPct.toFixed(1)}% · PF{' '}
+                        <span className="font-semibold text-slate-200">{btPfText}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             </section>
 

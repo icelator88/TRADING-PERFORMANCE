@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef } from 'react';
-import { ExternalLink } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react';
 import type { TranslationSet } from '../i18n/translations';
 import type { TradeCategory, TradeRecord } from '../types/trading';
 import {
@@ -34,8 +34,19 @@ export function TradeTable({
   onEdit,
   onDelete,
 }: TradeTableProps) {
-  const ordered = sortTradesChronologically(trades).reverse();
+  const ordered = useMemo(
+    () => sortTradesChronologically(trades).reverse(),
+    [trades],
+  );
   const tableContainerRef = useRef<HTMLDivElement | null>(null);
+  const topScrollRef = useRef<HTMLDivElement | null>(null);
+  const tableScrollRef = useRef<HTMLDivElement | null>(null);
+  const tableElRef = useRef<HTMLTableElement | null>(null);
+  const syncSourceRef = useRef<'top' | 'table' | null>(null);
+
+  const [topSpacerWidth, setTopSpacerWidth] = useState<number>(0);
+  const [canScrollLeft, setCanScrollLeft] = useState<boolean>(false);
+  const [canScrollRight, setCanScrollRight] = useState<boolean>(false);
 
   const highlightedSet = useMemo(
     () => new Set(highlightedTradeIds ?? []),
@@ -43,6 +54,114 @@ export function TradeTable({
   );
 
   const highlightSignature = `${highlightDate ?? ''}|${(highlightedTradeIds ?? []).join(',')}`;
+
+  // Discover dynamic extra column keys present across visible rows
+  const extraKeys = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          ordered.flatMap((tr) => (tr.extraColumns ? Object.keys(tr.extraColumns) : [])),
+        ),
+      ),
+    [ordered],
+  );
+
+  const updateScrollButtons = useCallback(() => {
+    const tableEl = tableScrollRef.current;
+    if (!tableEl) return;
+    const maxScroll = Math.max(0, tableEl.scrollWidth - tableEl.clientWidth);
+    setCanScrollLeft(tableEl.scrollLeft > 2);
+    setCanScrollRight(maxScroll > 2 && tableEl.scrollLeft < maxScroll - 2);
+  }, []);
+
+  const syncDimensions = useCallback(() => {
+    const tableEl = tableScrollRef.current;
+    const topEl = topScrollRef.current;
+    if (!tableEl) return;
+
+    const maxScroll = Math.max(0, tableEl.scrollWidth - tableEl.clientWidth);
+    const topClientW = topEl ? topEl.clientWidth : tableEl.clientWidth;
+    setTopSpacerWidth(topClientW + maxScroll);
+
+    setCanScrollLeft(tableEl.scrollLeft > 2);
+    setCanScrollRight(maxScroll > 2 && tableEl.scrollLeft < maxScroll - 2);
+
+    if (topEl && Math.abs(topEl.scrollLeft - tableEl.scrollLeft) > 1) {
+      syncSourceRef.current = 'table';
+      topEl.scrollLeft = tableEl.scrollLeft;
+      requestAnimationFrame(() => {
+        if (syncSourceRef.current === 'table') {
+          syncSourceRef.current = null;
+        }
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (ordered.length === 0) return;
+    syncDimensions();
+    const rafId = requestAnimationFrame(syncDimensions);
+
+    const observer =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => {
+            syncDimensions();
+          })
+        : null;
+
+    if (observer) {
+      if (tableScrollRef.current) observer.observe(tableScrollRef.current);
+      if (tableElRef.current) observer.observe(tableElRef.current);
+      if (topScrollRef.current) observer.observe(topScrollRef.current);
+    }
+
+    window.addEventListener('resize', syncDimensions);
+    return () => {
+      cancelAnimationFrame(rafId);
+      observer?.disconnect();
+      window.removeEventListener('resize', syncDimensions);
+    };
+  }, [ordered.length, extraKeys.length, category, syncDimensions]);
+
+  const handleTopScroll = () => {
+    if (syncSourceRef.current === 'table') return;
+    const topEl = topScrollRef.current;
+    const tableEl = tableScrollRef.current;
+    if (!topEl || !tableEl) return;
+    syncSourceRef.current = 'top';
+    tableEl.scrollLeft = topEl.scrollLeft;
+    updateScrollButtons();
+    requestAnimationFrame(() => {
+      if (syncSourceRef.current === 'top') {
+        syncSourceRef.current = null;
+      }
+    });
+  };
+
+  const handleTableScroll = () => {
+    if (syncSourceRef.current === 'top') return;
+    const topEl = topScrollRef.current;
+    const tableEl = tableScrollRef.current;
+    if (!topEl || !tableEl) return;
+    syncSourceRef.current = 'table';
+    topEl.scrollLeft = tableEl.scrollLeft;
+    updateScrollButtons();
+    requestAnimationFrame(() => {
+      if (syncSourceRef.current === 'table') {
+        syncSourceRef.current = null;
+      }
+    });
+  };
+
+  const scrollByStep = (direction: 'left' | 'right') => {
+    const tableEl = tableScrollRef.current;
+    if (!tableEl) return;
+    const step = Math.max(240, Math.round(tableEl.clientWidth * 0.45));
+    tableEl.scrollBy({
+      left: direction === 'right' ? step : -step,
+      behavior: 'smooth',
+    });
+  };
 
   useEffect(() => {
     if (!highlightDate && highlightedSet.size === 0) return;
@@ -60,13 +179,6 @@ export function TradeTable({
     }, 80);
     return () => window.clearTimeout(timer);
   }, [highlightSignature, highlightDate, highlightedSet.size, ordered.length]);
-
-  // Discover dynamic extra column keys present across visible rows
-  const extraKeys = Array.from(
-    new Set(
-      ordered.flatMap((tr) => (tr.extraColumns ? Object.keys(tr.extraColumns) : [])),
-    ),
-  );
 
   if (ordered.length === 0) {
     return (
@@ -99,8 +211,48 @@ export function TradeTable({
       ref={tableContainerRef}
       className="overflow-hidden rounded-lg border border-[#1E2634] bg-[#121721]"
     >
-      <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-left text-xs">
+      {/* Synchronized Top Horizontal Scrollbar + Compact Left/Right Buttons */}
+      <div className="flex items-center gap-2 border-b border-[#1E2634] bg-[#0B0E14]/90 px-2.5 py-1.5">
+        <button
+          type="button"
+          onClick={() => scrollByStep('left')}
+          disabled={!canScrollLeft}
+          aria-label="Scorri tabella a sinistra"
+          title="Scorri a sinistra"
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-[#263042] bg-[#121721] text-slate-300 transition-colors hover:border-sky-500/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
+        >
+          <ChevronLeft className="h-3.5 w-3.5" />
+        </button>
+
+        <div
+          ref={topScrollRef}
+          onScroll={handleTopScroll}
+          aria-label="Barra di scorrimento orizzontale tabella"
+          className="top-sync-scrollbar flex-1 overflow-x-auto overflow-y-hidden"
+        >
+          <div
+            style={{ width: topSpacerWidth > 0 ? `${topSpacerWidth}px` : '100%', height: '1px' }}
+          />
+        </div>
+
+        <button
+          type="button"
+          onClick={() => scrollByStep('right')}
+          disabled={!canScrollRight}
+          aria-label="Scorri tabella a destra"
+          title="Scorri a destra"
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-[#263042] bg-[#121721] text-slate-300 transition-colors hover:border-sky-500/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      <div
+        ref={tableScrollRef}
+        onScroll={handleTableScroll}
+        className="overflow-x-auto"
+      >
+        <table ref={tableElRef} className="w-full border-collapse text-left text-xs">
           <thead>
             <tr className="border-b border-[#1E2634] bg-[#0B0E14] text-xs font-semibold text-slate-400">
               <th className="px-3.5 py-3 whitespace-nowrap">{t.table.date}</th>

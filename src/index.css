@@ -51,6 +51,30 @@
   }
 }
 
+.top-sync-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #334155 #0b0e14;
+}
+
+.top-sync-scrollbar::-webkit-scrollbar {
+  height: 10px;
+}
+
+.top-sync-scrollbar::-webkit-scrollbar-track {
+  background: #0b0e14;
+  border-radius: 5px;
+}
+
+.top-sync-scrollbar::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 5px;
+  border: 2px solid #0b0e14;
+}
+
+.top-sync-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #38bdf8;
+}
+
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
