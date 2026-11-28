@@ -16,9 +16,17 @@ export interface TranslationSet {
     qualifyingWeeks: string;
     trackedAssets: string;
     consecutiveWeeks: string;
+    weeksPlural: string;
     weekSingular: string;
     noStreaksFound: string;
+    noQualifyingWeeksFound: string;
     detectedStreaksTitle: string;
+    qualifyingBreakdownTitle: string;
+    weekColumn: string;
+    statusColumn: string;
+    combinedTotalColumn: string;
+    singleWeekLabel: string;
+    streakBadgePrefix: string;
     activeStreakNow: string;
     completedStreak: string;
     noActiveStreak: string;
@@ -179,20 +187,28 @@ export const TRANSLATIONS: Record<Language, TranslationSet> = {
     },
     akinator: {
       title: 'AKINATOR — FULL SCAN BACKTEST',
-      subtitle: 'Pure Mechanical Strategy Scan (Excludes Live Journaling Errors)',
+      subtitle: 'Full Backtest history scan across all active portfolio assets together (excludes Live Journaling errors)',
       maxStreak: 'Max Consecutive Streak',
       latestStatus: 'Latest Streak Status',
-      qualifyingWeeks: 'Qualifying Weeks (<= -3.0 R all assets)',
-      trackedAssets: 'Backtest Assets Scanned',
+      qualifyingWeeks: 'Qualifying Weeks (each asset ≤ -3.0 R)',
+      trackedAssets: 'Active Assets Scanned Together',
       consecutiveWeeks: 'Consecutive Weeks',
+      weeksPlural: 'Weeks',
       weekSingular: 'Week',
-      noStreaksFound: 'No 2+ consecutive qualifying drawdown weeks detected in Backtest.',
-      detectedStreaksTitle: 'Detected Consecutive Drawdown Streaks (All Lengths)',
+      noStreaksFound: 'No 2+ consecutive qualifying drawdown weeks detected.',
+      noQualifyingWeeksFound: 'No qualifying drawdown weeks detected where all active assets closed ≤ -3.0 R.',
+      detectedStreaksTitle: 'Consecutive 2+ Week Drawdown Streaks',
+      qualifyingBreakdownTitle: 'Qualifying Weeks Breakdown (All Active Assets)',
+      weekColumn: 'Week (Mon–Sun)',
+      statusColumn: 'Type',
+      combinedTotalColumn: 'Combined R',
+      singleWeekLabel: 'Single Week',
+      streakBadgePrefix: 'Streak',
       activeStreakNow: 'Active Streak on Latest Week',
       completedStreak: 'Historical Streak',
       noActiveStreak: 'No Active Drawdown Streak',
-      noBacktestData: 'Import or add Backtest trades to run the Akinator weekly scan.',
-      ruleHint: 'Rule: A Mon–Sun calendar week qualifies only if EVERY Backtest asset closed <= -3.0 R.',
+      noBacktestData: 'Import or add Backtest trades for active portfolio assets to run the Akinator scan.',
+      ruleHint: 'Rule: A Mon–Sun week qualifies only if ALL active portfolio assets closed ≤ -3.0 R.',
     },
     dashboard: {
       heading: 'Dashboard & Comparison',
@@ -346,20 +362,28 @@ export const TRANSLATIONS: Record<Language, TranslationSet> = {
     },
     akinator: {
       title: 'AKINATOR — SCANSIONE COMPLETA BACKTEST',
-      subtitle: 'Scansione Meccanica Pura Backtest (Esclude Errori del Journal Reale)',
+      subtitle: 'Scansione completa dello storico Backtest su tutti gli asset attivi in portafoglio insieme (esclude errori Journal Reale)',
       maxStreak: 'Serie Consecutiva Massima',
       latestStatus: 'Stato Ultima Serie',
-      qualifyingWeeks: 'Settimane Qualificanti (<= -3.0 R tutti gli asset)',
-      trackedAssets: 'Asset Analizzati nel Backtest',
+      qualifyingWeeks: 'Settimane Qualificanti (ogni asset ≤ -3.0 R)',
+      trackedAssets: 'Asset Attivi Analizzati Insieme',
       consecutiveWeeks: 'Settimane Consecutive',
+      weeksPlural: 'Settimane',
       weekSingular: 'Settimana',
-      noStreaksFound: 'Nessuna serie di 2+ settimane consecutive di drawdown trovata nel Backtest.',
-      detectedStreaksTitle: 'Serie Consecutive di Drawdown Rilevate (Tutte le Durate)',
+      noStreaksFound: 'Nessuna serie di 2+ settimane consecutive di drawdown rilevata.',
+      noQualifyingWeeksFound: 'Nessuna settimana qualificante rilevata in cui tutti gli asset attivi hanno chiuso ≤ -3.0 R.',
+      detectedStreaksTitle: 'Serie Consecutive di Drawdown (2+ Settimane)',
+      qualifyingBreakdownTitle: 'Dettaglio Settimane Qualificanti (Tutti gli Asset Attivi)',
+      weekColumn: 'Settimana (Lun–Dom)',
+      statusColumn: 'Tipo',
+      combinedTotalColumn: 'Totale Combinato',
+      singleWeekLabel: 'Singola',
+      streakBadgePrefix: 'Serie',
       activeStreakNow: 'Serie Attiva sull’Ultima Settimana',
       completedStreak: 'Serie Storica Conclusa',
       noActiveStreak: 'Nessuna Serie Attiva',
-      noBacktestData: 'Importa o aggiungi operazioni Backtest per eseguire la scansione settimanale Akinator.',
-      ruleHint: 'Regola: una settimana Lun–Dom qualifica solo se TUTTI gli asset del Backtest chiudono <= -3.0 R.',
+      noBacktestData: 'Importa o aggiungi operazioni Backtest sugli asset attivi per eseguire la scansione Akinator.',
+      ruleHint: 'Regola: una settimana Lun–Dom qualifica solo se TUTTI gli asset attivi chiudono ≤ -3.0 R.',
     },
     dashboard: {
       heading: 'Dashboard & Confronto',
@@ -513,20 +537,28 @@ export const TRANSLATIONS: Record<Language, TranslationSet> = {
     },
     akinator: {
       title: 'AKINATOR — FULL SCAN BACKTEST',
-      subtitle: 'Pure Mechanical Strategy Scan (Excludes Live Journaling Errors)',
+      subtitle: 'Escaneo completo del historial Backtest en todos los activos activos juntos (excluye errores de Live)',
       maxStreak: 'Racha Consecutiva Máxima',
       latestStatus: 'Estado de Última Racha',
-      qualifyingWeeks: 'Semanas Calificantes (<= -3.0 R todos los activos)',
-      trackedAssets: 'Activos Analizados en Backtest',
+      qualifyingWeeks: 'Semanas Calificantes (cada activo ≤ -3.0 R)',
+      trackedAssets: 'Activos Activos Escaneados Juntos',
       consecutiveWeeks: 'Semanas Consecutivas',
+      weeksPlural: 'Semanas',
       weekSingular: 'Semana',
       noStreaksFound: 'No se detectaron rachas de 2+ semanas consecutivas en Backtest.',
-      detectedStreaksTitle: 'Rachas Consecutivas de Drawdown Detectadas',
+      noQualifyingWeeksFound: 'No se detectaron semanas donde todos los activos activos cerraran ≤ -3.0 R.',
+      detectedStreaksTitle: 'Rachas Consecutivas de Drawdown (2+ Semanas)',
+      qualifyingBreakdownTitle: 'Desglose de Semanas Calificantes (Todos los Activos Activos)',
+      weekColumn: 'Semana (Lun–Dom)',
+      statusColumn: 'Tipo',
+      combinedTotalColumn: 'Total Combinado',
+      singleWeekLabel: 'Individual',
+      streakBadgePrefix: 'Racha',
       activeStreakNow: 'Racha Activa en Última Semana',
       completedStreak: 'Racha Histórica',
       noActiveStreak: 'Sin Racha Activa',
       noBacktestData: 'Importa o registra operaciones Backtest para ejecutar el escaneo semanal Akinator.',
-      ruleHint: 'Regla: una semana Lun–Dom califica solo si TODOS los activos de Backtest cierran <= -3.0 R.',
+      ruleHint: 'Regla: una semana Lun–Dom califica solo si TODOS los activos activos cierran ≤ -3.0 R.',
     },
     dashboard: {
       heading: 'Panel y Comparativa',

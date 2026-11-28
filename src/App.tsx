@@ -846,9 +846,25 @@ export function App() {
     dashboardPortfolioLive,
   ]);
 
+  const akinatorBacktestTrades = useMemo(() => {
+    return backtestTrades.filter((tr) => {
+      if (tr.category !== 'backtest') return false;
+      if (selectedSetup !== 'ALL') {
+        const targetLower = selectedSetup.trim().toLowerCase();
+        const s = (tr.setup || tr.strategy || '').trim().toLowerCase();
+        if (s !== targetLower) return false;
+      }
+      const assetKey = tr.asset.trim().toUpperCase();
+      if (portfolioFilterMode !== 'all' && !activePortfolioAssetSet.has(assetKey)) {
+        return false;
+      }
+      return true;
+    });
+  }, [backtestTrades, selectedSetup, portfolioFilterMode, activePortfolioAssetSet]);
+
   const dashboardAkinatorScan = useMemo(
-    () => calculateAkinatorBacktestScan(visibleDashboardBacktestTrades),
-    [visibleDashboardBacktestTrades],
+    () => calculateAkinatorBacktestScan(akinatorBacktestTrades),
+    [akinatorBacktestTrades],
   );
 
   const dashboardBacktestStats = useMemo(
