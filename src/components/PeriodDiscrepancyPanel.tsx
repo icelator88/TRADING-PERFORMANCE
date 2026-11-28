@@ -7,7 +7,7 @@ import type {
   TradeCategory,
   TradeRecord,
 } from '../types/trading';
-import { isConsciousSkipTrade } from '../utils/aiDisciplineCoach';
+import { isConsciousSkipTrade, isPausaLavoroTrade } from '../utils/aiDisciplineCoach';
 import {
   formatDisplayDate,
   formatR,
@@ -556,7 +556,9 @@ export function PeriodDiscrepancyPanel({
 
     const discRows = rows.filter((r) => r.isDiscrepancy);
     const btSum = periodBt.reduce((acc, tr) => acc + (Number.isFinite(tr.netR) ? tr.netR : 0), 0);
-    const liveSum = periodLive.reduce((acc, tr) => acc + (Number.isFinite(tr.netR) ? tr.netR : 0), 0);
+    const liveSum = periodLive
+      .filter((tr) => !isPausaLavoroTrade(tr))
+      .reduce((acc, tr) => acc + (Number.isFinite(tr.netR) ? tr.netR : 0), 0);
 
     return {
       allRows: rows,

@@ -46,6 +46,8 @@ export interface AiCoachAnalysisInput {
 const CONSCIOUS_SKIP_REGEX =
   /(?:non[\s_-]+preso[\s_-]+consapevole|consapevole|pausa[\s_-]*lavoro|festiv[oi]?)/i;
 
+const PAUSA_LAVORO_REGEX = /\bpausa[\s_-]*lavoro\b/i;
+
 const EXPLICIT_MISTAKE_PATTERNS: Array<{ label: string; regex: RegExp }> = [
   {
     label: 'Errore / X Sbaglio',
@@ -85,6 +87,12 @@ function getCombinedTradeText(trade: TradeRecord): string {
   return [trade.notes ?? '', trade.missedReason ?? '', ...extraValues]
     .filter((v) => typeof v === 'string' && v.trim().length > 0)
     .join(' | ');
+}
+
+export function isPausaLavoroTrade(trade: TradeRecord): boolean {
+  const text = getCombinedTradeText(trade);
+  if (!text) return false;
+  return PAUSA_LAVORO_REGEX.test(text);
 }
 
 export function isConsciousSkipTrade(trade: TradeRecord): boolean {
@@ -140,6 +148,136 @@ export function getAdherenceEmoji(score: number): string {
   if (score >= 70) return '🙂';
   if (score >= 50) return '😐';
   return '😤';
+}
+
+export interface WorkPauseComparisonResult {
+  workPauseTrades: TradeRecord[];
+  excludedLiveCount: number;
+}
+
+/**
+ * Collects all trades tagged with "PAUSA LAVORO" across Backtest, Journal Reale, and Missed Trades
+ * without double-counting, preferring the Backtest benchmark trade when matched so "Missed R during work hours"
+ * reflects the true mechanical outcome missed while working.
+ */
+export function extractWorkPauseComparison(params: {
+  backtestTrades: TradeRecord[];
+  liveTrades: TradeRecord[];
+  missedTrades: TradeRecord[];
+}): WorkPauseComparisonResult {
+  const sortedBt = sortTradesChronologically(params.backtestTrades);
+  const sortedLive = sortTradesChronologically(params.liveTrades);
+  const sortedMissed = sortTradesChronologically(params.missedTrades);
+
+  const matchedBtIds = new Set<string>();
+  const matchedLiveIds = new Set<string>();
+  const linkedMissedIds = new Set<string>();
+  const workPauseTrades: TradeRecord[] = [];
+
+  // Pass 1: Match Backtest <-> Journal Reale by Date + Asset + Setup + Bias
+  sortedBt.forEach((bt) => {
+    let bestLive: TradeRecord | null = null;
+    let bestDist = Infinity;
+
+    for (const live of sortedLive) {
+      if (matchedLiveIds.has(live.id)) continue;
+      if (
+        live.date === bt.date &&
+        normAsset(live.asset) === normAsset(bt.asset) &&
+        normSetup(live.setup) === normSetup(bt.setup) &&
+        normBias(live.bias) === normBias(bt.bias)
+      ) {
+        const dist = timeDistanceMinutes(bt, live);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestLive = live;
+        }
+      }
+    }
+
+    if (bestLive) {
+      matchedBtIds.add(bt.id);
+      matchedLiveIds.add(bestLive.id);
+      if (isPausaLavoroTrade(bt) || isPausaLavoroTrade(bestLive)) {
+        workPauseTrades.push(bt);
+      }
+    }
+  });
+
+  // Pass 2: Match remaining Backtest <-> Journal Reale by Date + Asset + Setup (or missing setup)
+  sortedBt.forEach((bt) => {
+    if (matchedBtIds.has(bt.id)) return;
+    let bestLive: TradeRecord | null = null;
+    let bestDist = Infinity;
+    const btSetup = normSetup(bt.setup);
+
+    for (const live of sortedLive) {
+      if (matchedLiveIds.has(live.id)) continue;
+      const liveSetup = normSetup(live.setup);
+      const setupMatches = btSetup === liveSetup || !btSetup || !liveSetup;
+      if (
+        live.date === bt.date &&
+        normAsset(live.asset) === normAsset(bt.asset) &&
+        setupMatches
+      ) {
+        const dist = timeDistanceMinutes(bt, live);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestLive = live;
+        }
+      }
+    }
+
+    if (bestLive) {
+      matchedBtIds.add(bt.id);
+      matchedLiveIds.add(bestLive.id);
+      if (isPausaLavoroTrade(bt) || isPausaLavoroTrade(bestLive)) {
+        workPauseTrades.push(bt);
+      }
+    }
+  });
+
+  // Unmatched Backtest trades tagged PAUSA LAVORO (directly or via linked Missed Trade)
+  sortedBt.forEach((bt) => {
+    if (matchedBtIds.has(bt.id)) return;
+    const btSetup = normSetup(bt.setup);
+    const matchingMissed = sortedMissed.find((m) => {
+      if (linkedMissedIds.has(m.id)) return false;
+      if (m.date !== bt.date || normAsset(m.asset) !== normAsset(bt.asset)) return false;
+      const mSetup = normSetup(m.setup);
+      return !btSetup || !mSetup || btSetup === mSetup;
+    });
+    if (matchingMissed) {
+      linkedMissedIds.add(matchingMissed.id);
+    }
+
+    if (isPausaLavoroTrade(bt) || (matchingMissed && isPausaLavoroTrade(matchingMissed))) {
+      workPauseTrades.push(bt);
+    }
+  });
+
+  // Unmatched Journal Reale trades tagged PAUSA LAVORO
+  sortedLive.forEach((live) => {
+    if (matchedLiveIds.has(live.id)) return;
+    if (isPausaLavoroTrade(live)) {
+      workPauseTrades.push(live);
+    }
+  });
+
+  // Unmatched Trade Non Presi tagged PAUSA LAVORO
+  sortedMissed.forEach((m) => {
+    if (linkedMissedIds.has(m.id)) return;
+    if (isPausaLavoroTrade(m)) {
+      workPauseTrades.push(m);
+    }
+  });
+
+  const excludedLiveCount = sortedLive.filter(isPausaLavoroTrade).length;
+
+  return {
+    workPauseTrades: sortTradesChronologically(workPauseTrades),
+    excludedLiveCount,
+  };
 }
 
 export function computeDisciplineMetrics(params: {

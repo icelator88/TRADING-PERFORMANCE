@@ -83,7 +83,11 @@ import {
   upsertMissedTradeInFirestore,
   upsertTradeInFirestore,
 } from './utils/firestoreSync';
-import type { LastMistakeInfo } from './utils/aiDisciplineCoach';
+import {
+  extractWorkPauseComparison,
+  isPausaLavoroTrade,
+  type LastMistakeInfo,
+} from './utils/aiDisciplineCoach';
 import { analizzaTradeConGemini, buildGeminiReviewPrompt } from './utils/geminiReview';
 import {
   fetchAndParseGoogleSheetTrades,
@@ -729,9 +733,17 @@ export function App() {
     [dashboardPortfolioBacktest],
   );
 
-  const liveStats = useMemo(
-    () => calculatePerformanceStats(dashboardPortfolioLive),
+  const liveTradesForStats = useMemo(
+    () => dashboardPortfolioLive.filter((tr) => !isPausaLavoroTrade(tr)),
     [dashboardPortfolioLive],
+  );
+
+  const excludedTabLiveWorkPauseCount =
+    dashboardPortfolioLive.length - liveTradesForStats.length;
+
+  const liveStats = useMemo(
+    () => calculatePerformanceStats(liveTradesForStats),
+    [liveTradesForStats],
   );
 
   const lastSyncedIdSet = useMemo(
@@ -872,9 +884,14 @@ export function App() {
     [visibleDashboardBacktestTrades],
   );
 
-  const dashboardLiveStats = useMemo(
-    () => calculatePerformanceStats(visibleDashboardLiveTrades),
+  const visibleDashboardLiveTradesForStats = useMemo(
+    () => visibleDashboardLiveTrades.filter((tr) => !isPausaLavoroTrade(tr)),
     [visibleDashboardLiveTrades],
+  );
+
+  const dashboardLiveStats = useMemo(
+    () => calculatePerformanceStats(visibleDashboardLiveTradesForStats),
+    [visibleDashboardLiveTradesForStats],
   );
 
   const liveAlignedBacktestTrades = useMemo(() => {
@@ -910,8 +927,8 @@ export function App() {
   }, [assetFilter, liveStartDateByAsset, liveStartDate]);
 
   const visibleDashboardCombinedTrades = useMemo(
-    () => [...visibleDashboardBacktestTrades, ...visibleDashboardLiveTrades],
-    [visibleDashboardBacktestTrades, visibleDashboardLiveTrades],
+    () => [...visibleDashboardBacktestTrades, ...visibleDashboardLiveTradesForStats],
+    [visibleDashboardBacktestTrades, visibleDashboardLiveTradesForStats],
   );
 
   const liveAlignedMissedTrades = useMemo(() => {
@@ -935,6 +952,28 @@ export function App() {
     dashboardPortfolioMissed,
     liveStartDateByAsset,
   ]);
+
+  const dashboardWorkPauseComparison = useMemo(() => {
+    const missedScope = isLiveAligned
+      ? liveAlignedMissedTrades
+      : dashboardPortfolioMissed;
+    return extractWorkPauseComparison({
+      backtestTrades: visibleDashboardBacktestTrades,
+      liveTrades: visibleDashboardLiveTrades,
+      missedTrades: missedScope,
+    });
+  }, [
+    isLiveAligned,
+    liveAlignedMissedTrades,
+    dashboardPortfolioMissed,
+    visibleDashboardBacktestTrades,
+    visibleDashboardLiveTrades,
+  ]);
+
+  const dashboardWorkPauseStats = useMemo(
+    () => calculatePerformanceStats(dashboardWorkPauseComparison.workPauseTrades),
+    [dashboardWorkPauseComparison.workPauseTrades],
+  );
 
   const effectiveSelectedPnlPeriod = useMemo(() => {
     const btSource =
@@ -1814,7 +1853,7 @@ export function App() {
   };
 
   const handleOpenGeminiReview = async () => {
-    const payload = buildGeminiReviewPrompt(liveStats, filteredLive);
+    const payload = buildGeminiReviewPrompt(liveStats, liveTradesForStats);
     setGeminiState({
       isOpen: true,
       loading: true,
@@ -2804,8 +2843,19 @@ export function App() {
                 </div>
 
                 <div className="rounded-lg border border-[#1E2634] bg-[#121721] p-5">
-                  <div className="text-xs font-medium text-slate-400">
-                    {t.dashboard.liveNetR}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-slate-400">
+                      {t.dashboard.liveNetR}
+                    </span>
+                    {dashboardWorkPauseComparison.excludedLiveCount > 0 ? (
+                      <span className="font-mono text-[10px] text-amber-300/90">
+                        {lang === 'en'
+                          ? `Excl. ${dashboardWorkPauseComparison.excludedLiveCount} PAUSA LAVORO`
+                          : lang === 'es'
+                            ? `Sin ${dashboardWorkPauseComparison.excludedLiveCount} PAUSA LAVORO`
+                            : `Escl. ${dashboardWorkPauseComparison.excludedLiveCount} PAUSA LAVORO`}
+                      </span>
+                    ) : null}
                   </div>
                   <div
                     className={`mt-2 font-mono text-2xl font-bold tabular-nums ${
@@ -2972,6 +3022,112 @@ export function App() {
                   );
                 })()}
               </div>
+
+              {/* Separate Work Hours Tracking: Missed R during PAUSA LAVORO alongside Full Backtest Benchmark */}
+              <div className="rounded-lg border border-amber-500/35 bg-[#121721] px-5 py-4">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div>
+                    <div className="text-xs font-semibold text-amber-300">
+                      {lang === 'en'
+                        ? 'Missed R During Work Hours (PAUSA LAVORO)'
+                        : lang === 'es'
+                          ? 'R Perdidos en Horario Laboral (PAUSA LAVORO)'
+                          : 'R Mancati in Orario Lavorativo (PAUSA LAVORO)'}
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-slate-400">
+                      {lang === 'en'
+                        ? 'Excluded from Real Win Rate, Real Net R, and operational errors · tracked alongside full Backtest benchmark.'
+                        : lang === 'es'
+                          ? 'Excluidos de Win Rate Real, R Neto Real y errores operativos · comparados con el benchmark completo de Backtest.'
+                          : 'Esclusi da Win Rate Reale, R Netto Reale ed errori operativi · tracciati separatamente accanto al benchmark Backtest completo.'}
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-6 font-mono tabular-nums">
+                    <div>
+                      <div className="text-[10px] text-slate-400">
+                        {lang === 'en'
+                          ? 'Missed R (Work Hours)'
+                          : lang === 'es'
+                            ? 'R Perdidos (Trabajo)'
+                            : 'R Mancati (Pausa Lavoro)'}
+                      </div>
+                      <div
+                        className={`text-base font-bold ${
+                          dashboardWorkPauseStats.totalTrades === 0
+                            ? 'text-slate-400'
+                            : dashboardWorkPauseStats.netR > 0
+                              ? 'text-amber-300'
+                              : dashboardWorkPauseStats.netR < 0
+                                ? 'text-emerald-400'
+                                : 'text-slate-200'
+                        }`}
+                      >
+                        {formatR(dashboardWorkPauseStats.netR)}
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        {dashboardWorkPauseStats.totalTrades} trade ({dashboardWorkPauseStats.wins} TP ·{' '}
+                        {dashboardWorkPauseStats.losses} SL · {dashboardWorkPauseStats.breakevens} BE)
+                      </div>
+                    </div>
+
+                    <div className="hidden h-8 w-px bg-[#1E2634] sm:block" />
+
+                    <div>
+                      <div className="text-[10px] text-slate-400">
+                        {lang === 'en' ? 'Full Backtest' : 'Backtest Completo'}
+                      </div>
+                      <div className="text-sm font-semibold text-emerald-400">
+                        {formatR(dashboardBacktestStats.netR)}
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        WR {dashboardBacktestStats.winRatePct.toFixed(1)}%
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-[10px] text-slate-400">
+                        {lang === 'en' ? 'Real Live (Clean)' : 'Reale (Escl. Lavoro)'}
+                      </div>
+                      <div className="text-sm font-semibold text-sky-400">
+                        {formatR(dashboardLiveStats.netR)}
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        WR {dashboardLiveStats.winRatePct.toFixed(1)}%
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-[10px] text-slate-400">
+                        {lang === 'en'
+                          ? 'Execution Delta (Excl. Work)'
+                          : lang === 'es'
+                            ? 'Delta Neto (Sin Trabajo)'
+                            : 'Scostamento Netto (Escl. Lavoro)'}
+                      </div>
+                      {(() => {
+                        const netExclWork = roundTo(
+                          dashboardLiveStats.netR -
+                            (dashboardBacktestStats.netR - dashboardWorkPauseStats.netR),
+                          2,
+                        );
+                        return (
+                          <div
+                            className={`text-sm font-semibold ${
+                              netExclWork >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                            }`}
+                          >
+                            {formatR(netExclWork)}
+                          </div>
+                        );
+                      })()}
+                      <div className="text-[10px] text-slate-500">
+                        {lang === 'en' ? 'vs reachable BT' : 'vs BT raggiungibile'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </section>
 
             {/* AI Discipline & Execution Coach (Dashboard-only Gemini diagnostic) */}
@@ -3053,7 +3209,22 @@ export function App() {
                     <tr className="border-b border-[#1E2634] bg-[#0B0E14] text-slate-400">
                       <th className="px-5 py-3">{t.dashboard.metricCol}</th>
                       <th className="px-5 py-3 text-right">{t.nav.backtest}</th>
-                      <th className="px-5 py-3 text-right">{t.nav.live}</th>
+                      <th className="px-5 py-3 text-right">
+                        <div>{t.nav.live}</div>
+                        {dashboardWorkPauseComparison.excludedLiveCount > 0 ? (
+                          <div className="font-mono text-[10px] font-normal text-slate-500">
+                            {lang === 'en' ? 'excl. PAUSA LAVORO' : 'escl. PAUSA LAVORO'}
+                          </div>
+                        ) : null}
+                      </th>
+                      <th className="px-5 py-3 text-right text-amber-300">
+                        <div>
+                          {lang === 'en' ? 'Work Hours (Missed)' : 'Pausa Lavoro (R Mancati)'}
+                        </div>
+                        <div className="font-mono text-[10px] font-normal text-slate-500">
+                          PAUSA LAVORO
+                        </div>
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#1E2634] font-mono tabular-nums">
@@ -3075,6 +3246,13 @@ export function App() {
                           {dashboardLiveStats.breakevens} BE · {dashboardLiveStats.unfilled} UF
                         </div>
                       </td>
+                      <td className="px-5 py-3 text-right text-amber-200">
+                        <div>{dashboardWorkPauseStats.totalTrades}</div>
+                        <div className="mt-0.5 text-[10px] text-slate-400">
+                          {dashboardWorkPauseStats.wins} TP · {dashboardWorkPauseStats.losses} SL ·{' '}
+                          {dashboardWorkPauseStats.breakevens} BE · {dashboardWorkPauseStats.unfilled} UF
+                        </div>
+                      </td>
                     </tr>
                     <tr>
                       <td className="px-5 py-3 font-sans text-slate-300">
@@ -3085,6 +3263,11 @@ export function App() {
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
                         {dashboardLiveStats.winRatePct.toFixed(1)}%
+                      </td>
+                      <td className="px-5 py-3 text-right text-amber-200">
+                        {dashboardWorkPauseStats.totalTrades > 0
+                          ? `${dashboardWorkPauseStats.winRatePct.toFixed(1)}%`
+                          : '—'}
                       </td>
                     </tr>
                     <tr>
@@ -3097,6 +3280,11 @@ export function App() {
                       <td className="px-5 py-3 text-right font-semibold text-sky-400">
                         {formatR(dashboardLiveStats.netR)}
                       </td>
+                      <td className="px-5 py-3 text-right font-semibold text-amber-300">
+                        {dashboardWorkPauseStats.totalTrades > 0
+                          ? formatR(dashboardWorkPauseStats.netR)
+                          : '—'}
+                      </td>
                     </tr>
                     <tr>
                       <td className="px-5 py-3 font-sans text-slate-300">
@@ -3108,6 +3296,11 @@ export function App() {
                       <td className="px-5 py-3 text-right text-slate-100">
                         {formatR(dashboardLiveStats.expectancyR)}
                       </td>
+                      <td className="px-5 py-3 text-right text-slate-300">
+                        {dashboardWorkPauseStats.totalTrades > 0
+                          ? formatR(dashboardWorkPauseStats.expectancyR)
+                          : '—'}
+                      </td>
                     </tr>
                     <tr>
                       <td className="px-5 py-3 font-sans text-slate-300">
@@ -3118,6 +3311,11 @@ export function App() {
                       </td>
                       <td className="px-5 py-3 text-right text-rose-400">
                         -{dashboardLiveStats.maxDrawdownR.toFixed(2)} R
+                      </td>
+                      <td className="px-5 py-3 text-right text-rose-300">
+                        {dashboardWorkPauseStats.totalTrades > 0
+                          ? `-${dashboardWorkPauseStats.maxDrawdownR.toFixed(2)} R`
+                          : '—'}
                       </td>
                     </tr>
                     <tr>
@@ -3132,6 +3330,13 @@ export function App() {
                       <td className="px-5 py-3 text-right text-slate-100">
                         {dashboardLiveStats.profitFactorInfinite ? 'Max' : dashboardLiveStats.profitFactor.toFixed(2)}
                       </td>
+                      <td className="px-5 py-3 text-right text-slate-300">
+                        {dashboardWorkPauseStats.totalTrades === 0
+                          ? '—'
+                          : dashboardWorkPauseStats.profitFactorInfinite
+                            ? 'Max'
+                            : dashboardWorkPauseStats.profitFactor.toFixed(2)}
+                      </td>
                     </tr>
                     <tr>
                       <td className="px-5 py-3 font-sans text-slate-300">
@@ -3144,6 +3349,13 @@ export function App() {
                       </td>
                       <td className="px-5 py-3 text-right text-slate-100">
                         {dashboardLiveStats.payoffRatio === null ? 'Max' : `${dashboardLiveStats.payoffRatio.toFixed(2)} : 1`}
+                      </td>
+                      <td className="px-5 py-3 text-right text-slate-300">
+                        {dashboardWorkPauseStats.totalTrades === 0
+                          ? '—'
+                          : dashboardWorkPauseStats.payoffRatio === null
+                            ? 'Max'
+                            : `${dashboardWorkPauseStats.payoffRatio.toFixed(2)} : 1`}
                       </td>
                     </tr>
                     <tr>
@@ -3169,6 +3381,21 @@ export function App() {
                             ? dashboardLiveStats.sortinoRatio.toFixed(2)
                             : '0.00'}
                       </td>
+                      <td className="px-5 py-3 text-right text-slate-300">
+                        {dashboardWorkPauseStats.totalTrades === 0
+                          ? '—'
+                          : `${
+                              dashboardWorkPauseStats.sharpeRatio !== null
+                                ? dashboardWorkPauseStats.sharpeRatio.toFixed(2)
+                                : '0.00'
+                            } / ${
+                              dashboardWorkPauseStats.sortinoInfinite
+                                ? 'Max'
+                                : dashboardWorkPauseStats.sortinoRatio !== null
+                                  ? dashboardWorkPauseStats.sortinoRatio.toFixed(2)
+                                  : '0.00'
+                            }`}
+                      </td>
                     </tr>
                     <tr>
                       <td className="px-5 py-3 font-sans text-slate-300">
@@ -3187,6 +3414,19 @@ export function App() {
                         {dashboardLiveStats.calmarRatio !== null ? dashboardLiveStats.calmarRatio.toFixed(2) : 'N/A'} /{' '}
                         {dashboardLiveStats.recoveryFactor !== null ? dashboardLiveStats.recoveryFactor.toFixed(2) : 'Max'}
                       </td>
+                      <td className="px-5 py-3 text-right text-slate-300">
+                        {dashboardWorkPauseStats.totalTrades === 0
+                          ? '—'
+                          : `${
+                              dashboardWorkPauseStats.calmarRatio !== null
+                                ? dashboardWorkPauseStats.calmarRatio.toFixed(2)
+                                : 'N/A'
+                            } / ${
+                              dashboardWorkPauseStats.recoveryFactor !== null
+                                ? dashboardWorkPauseStats.recoveryFactor.toFixed(2)
+                                : 'Max'
+                            }`}
+                      </td>
                     </tr>
                     <tr>
                       <td className="px-5 py-3 font-sans text-slate-300">
@@ -3197,6 +3437,11 @@ export function App() {
                       </td>
                       <td className="px-5 py-3 text-right text-sky-400">
                         {dashboardLiveStats.riskOfRuinPct.toFixed(2)}%
+                      </td>
+                      <td className="px-5 py-3 text-right text-amber-300">
+                        {dashboardWorkPauseStats.totalTrades > 0
+                          ? `${dashboardWorkPauseStats.riskOfRuinPct.toFixed(2)}%`
+                          : '—'}
                       </td>
                     </tr>
                   </tbody>
@@ -3500,8 +3745,17 @@ export function App() {
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-lg border border-[#1E2634] bg-[#121721] p-5">
-                <div className="text-xs font-medium text-slate-400">
-                  {t.journal.totalTrades}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-slate-400">
+                    {t.journal.totalTrades}
+                  </span>
+                  {excludedTabLiveWorkPauseCount > 0 ? (
+                    <span className="font-mono text-[10px] text-amber-300/90">
+                      {lang === 'en'
+                        ? `Excl. ${excludedTabLiveWorkPauseCount} PAUSA LAVORO`
+                        : `Escl. ${excludedTabLiveWorkPauseCount} PAUSA LAVORO`}
+                    </span>
+                  ) : null}
                 </div>
                 <div className="mt-2 font-mono text-2xl font-bold text-slate-100 tabular-nums">
                   {liveStats.totalTrades}
