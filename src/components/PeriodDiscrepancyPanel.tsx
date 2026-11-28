@@ -1,8 +1,19 @@
-import { useMemo, useState } from 'react';
-import { ExternalLink, Filter } from 'lucide-react';
-import type { Language, TradeRecord } from '../types/trading';
+import { useMemo, useState, type KeyboardEvent } from 'react';
+import { Check, ExternalLink, Filter, Pencil, X } from 'lucide-react';
+import type {
+  BiasType,
+  Language,
+  OutcomeType,
+  TradeCategory,
+  TradeRecord,
+} from '../types/trading';
 import { isConsciousSkipTrade } from '../utils/aiDisciplineCoach';
-import { formatDisplayDate, formatR } from '../utils/calculations';
+import {
+  formatDisplayDate,
+  formatR,
+  generateTradeId,
+  roundTo,
+} from '../utils/calculations';
 
 interface PeriodDiscrepancyPanelProps {
   lang: Language;
@@ -13,6 +24,7 @@ interface PeriodDiscrepancyPanelProps {
   backtestTrades: TradeRecord[];
   liveTrades: TradeRecord[];
   missedTrades: TradeRecord[];
+  onSaveTrade?: (saved: TradeRecord, previousCategory?: TradeCategory) => Promise<void>;
 }
 
 type DiscrepancyKind =
@@ -114,8 +126,202 @@ export function PeriodDiscrepancyPanel({
   backtestTrades,
   liveTrades,
   missedTrades,
+  onSaveTrade,
 }: PeriodDiscrepancyPanelProps) {
   const [filterMode, setFilterMode] = useState<'discrepancies' | 'all'>('discrepancies');
+  const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
+  const [draftBias, setDraftBias] = useState<BiasType>('LONG');
+  const [draftOutcome, setDraftOutcome] = useState<OutcomeType | ''>('');
+  const [draftNetR, setDraftNetR] = useState<string>('0');
+  const [draftNotes, setDraftNotes] = useState<string>('');
+  const [draftUrl, setDraftUrl] = useState<string>('');
+  const [savingRowKey, setSavingRowKey] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const startEditing = (row: PeriodComparisonRow) => {
+    setSaveError(null);
+    setEditingRowKey(row.rowKey);
+    const initialBias: BiasType =
+      row.liveTrade?.bias === 'SHORT' || (!row.liveTrade && row.btTrade?.bias === 'SHORT')
+        ? 'SHORT'
+        : 'LONG';
+    setDraftBias(initialBias);
+    if (row.liveTrade) {
+      setDraftOutcome(row.liveTrade.outcome);
+      setDraftNetR(String(row.liveTrade.netR));
+      setDraftNotes(row.liveTrade.notes ?? '');
+      setDraftUrl(row.liveTrade.tradingViewUrl ?? row.btTrade?.tradingViewUrl ?? '');
+    } else {
+      setDraftOutcome('');
+      setDraftNetR('0');
+      setDraftNotes(row.notes ?? '');
+      setDraftUrl(row.btTrade?.tradingViewUrl ?? '');
+    }
+  };
+
+  const cancelEditing = () => {
+    setEditingRowKey(null);
+    setSaveError(null);
+  };
+
+  const handleOutcomeDraftChange = (
+    nextVal: OutcomeType | '',
+    row: PeriodComparisonRow,
+  ) => {
+    setDraftOutcome(nextVal);
+    if (nextVal === '') {
+      setDraftNetR('0');
+      return;
+    }
+    if (nextVal === 'BE' || nextVal === 'UNFILLED') {
+      setDraftNetR('0');
+      return;
+    }
+    if (nextVal === 'STOP LOSS') {
+      const cur = Number(draftNetR);
+      if (!Number.isFinite(cur) || cur >= 0) {
+        setDraftNetR('-1');
+      }
+      return;
+    }
+    if (nextVal === 'TP') {
+      const cur = Number(draftNetR);
+      if (!Number.isFinite(cur) || cur <= 0) {
+        const fallbackTp =
+          row.btTrade && row.btTrade.netR > 0
+            ? row.btTrade.netR
+            : row.liveTrade?.targetRR && row.liveTrade.targetRR > 0
+              ? row.liveTrade.targetRR
+              : 2;
+        setDraftNetR(String(fallbackTp));
+      }
+    }
+  };
+
+  const handleSaveRow = async (row: PeriodComparisonRow) => {
+    if (!onSaveTrade || savingRowKey) return;
+    setSavingRowKey(row.rowKey);
+    setSaveError(null);
+
+    try {
+      const trimmedNotes = draftNotes.trim();
+      const trimmedUrl = draftUrl.trim();
+      const parsedR = Number(draftNetR);
+      const cleanNetR =
+        draftOutcome === 'BE' || draftOutcome === 'UNFILLED' || draftOutcome === ''
+          ? 0
+          : Number.isFinite(parsedR)
+            ? roundTo(parsedR, 2)
+            : 0;
+
+      if (row.liveTrade) {
+        const riskPct = Number.isFinite(row.liveTrade.riskPct)
+          ? row.liveTrade.riskPct
+          : 1;
+        const nextOutcome = (draftOutcome || row.liveTrade.outcome) as OutcomeType;
+        const updatedLive: TradeRecord = {
+          ...row.liveTrade,
+          bias: draftBias,
+          outcome: nextOutcome,
+          netR: cleanNetR,
+          netReturnPct: roundTo(cleanNetR * riskPct, 2),
+          notes: trimmedNotes,
+          tradingViewUrl: trimmedUrl,
+        };
+        await onSaveTrade(updatedLive);
+      } else if (row.btTrade) {
+        if (draftOutcome !== '') {
+          const riskPct = Number.isFinite(row.btTrade.riskPct)
+            ? row.btTrade.riskPct
+            : 1;
+          const newLive: TradeRecord = {
+            ...row.btTrade,
+            id: generateTradeId('li'),
+            category: 'live',
+            isMissed: false,
+            bias: draftBias,
+            outcome: draftOutcome,
+            netR: cleanNetR,
+            netReturnPct: roundTo(cleanNetR * riskPct, 2),
+            notes: trimmedNotes,
+            tradingViewUrl: trimmedUrl,
+            createdAt: Date.now(),
+          };
+          await onSaveTrade(newLive);
+        } else {
+          const updatedBt: TradeRecord = {
+            ...row.btTrade,
+            bias: draftBias,
+            notes: trimmedNotes,
+            tradingViewUrl: trimmedUrl,
+          };
+          await onSaveTrade(updatedBt);
+        }
+      }
+
+      setEditingRowKey(null);
+    } catch (err) {
+      setSaveError(
+        err instanceof Error
+          ? err.message
+          : 'Errore durante il salvataggio della modifica.',
+      );
+    } finally {
+      setSavingRowKey(null);
+    }
+  };
+
+  const computePreviewDiscrepancyKind = (row: PeriodComparisonRow): DiscrepancyKind => {
+    const simulatedHasSkip =
+      (row.btTrade ? isConsciousSkipTrade({ ...row.btTrade, notes: draftNotes }) : false) ||
+      isConsciousSkipTrade({
+        id: 'preview',
+        category: 'live',
+        date: row.date,
+        asset: row.asset,
+        setup: row.setup,
+        bias: draftBias,
+        riskPct: 1,
+        outcome: (draftOutcome || 'BE') as OutcomeType,
+        netR: 0,
+        netReturnPct: 0,
+        notes: draftNotes,
+        createdAt: 0,
+      });
+
+    if (simulatedHasSkip) return 'skip_consapevole';
+
+    if (row.btTrade && (row.liveTrade || draftOutcome !== '')) {
+      const effectiveLiveOutcome = (draftOutcome || row.liveTrade?.outcome || 'BE') as OutcomeType;
+      const outcomeDiffers = row.btTrade.outcome !== effectiveLiveOutcome;
+      const biasDiffers = normBias(row.btTrade.bias) !== normBias(draftBias);
+      return outcomeDiffers || biasDiffers ? 'esito_diverso' : 'allineato';
+    }
+
+    if (row.btTrade && !row.liveTrade && draftOutcome === '') {
+      return row.btTrade.outcome === 'UNFILLED' ? 'unfilled' : 'mancato';
+    }
+
+    if (!row.btTrade && row.liveTrade) {
+      const effectiveOutcome = (draftOutcome || row.liveTrade.outcome) as OutcomeType;
+      return effectiveOutcome === 'UNFILLED' ? 'unfilled' : 'fuori_piano';
+    }
+
+    return row.discrepancyKind;
+  };
+
+  const handleEditKeyDown = (
+    e: KeyboardEvent<HTMLInputElement | HTMLSelectElement>,
+    row: PeriodComparisonRow,
+  ) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void handleSaveRow(row);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelEditing();
+    }
+  };
 
   const matchesPeriod = (dateStr: string) => {
     if (!selectedPeriod) return false;
@@ -369,8 +575,8 @@ export function PeriodDiscrepancyPanel({
   const displayedRows = filterMode === 'discrepancies' ? discrepancyRows : allRows;
   const periodDeltaR = Math.round((periodLiveNetR - periodBtNetR) * 100) / 100;
 
-  const renderBadge = (row: PeriodComparisonRow) => {
-    switch (row.discrepancyKind) {
+  const renderBadgeByKind = (kind: DiscrepancyKind) => {
+    switch (kind) {
       case 'mancato':
         return (
           <span className="inline-flex items-center rounded border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold text-amber-300 whitespace-nowrap">
@@ -514,6 +720,15 @@ export function PeriodDiscrepancyPanel({
         </div>
       ) : null}
 
+      {saveError ? (
+        <div
+          role="alert"
+          className="mt-3 rounded-md border border-rose-500/40 bg-rose-500/10 px-3.5 py-2 text-xs text-rose-200"
+        >
+          {saveError}
+        </div>
+      ) : null}
+
       {/* Comparison Table */}
       {!selectedPeriod ? (
         <div className="mt-4 flex h-28 items-center justify-center rounded-md border border-dashed border-[#263042] bg-[#0B0E14]/70 text-xs text-slate-400">
@@ -545,10 +760,16 @@ export function PeriodDiscrepancyPanel({
                 <th className="px-3.5 py-2.5 whitespace-nowrap">Scostamento</th>
                 <th className="min-w-[180px] px-3.5 py-2.5">Note</th>
                 <th className="px-3.5 py-2.5 text-center whitespace-nowrap">Grafico</th>
+                {onSaveTrade ? (
+                  <th className="px-3.5 py-2.5 text-right whitespace-nowrap">Azioni</th>
+                ) : null}
               </tr>
             </thead>
             <tbody className="divide-y divide-[#1E2634]">
               {displayedRows.map((row) => {
+                const isEditing = editingRowKey === row.rowKey;
+                const isSaving = savingRowKey === row.rowKey;
+
                 const sameDirection =
                   row.btBias && row.liveBias
                     ? normBias(row.btBias) === normBias(row.liveBias)
@@ -563,11 +784,16 @@ export function PeriodDiscrepancyPanel({
 
                 const primaryUrl = row.liveUrl || row.btUrl;
                 const hasDistinctSecondUrl = Boolean(row.liveUrl && row.btUrl && row.liveUrl !== row.btUrl);
+                const badgeKind = isEditing
+                  ? computePreviewDiscrepancyKind(row)
+                  : row.discrepancyKind;
 
                 return (
                   <tr
                     key={row.rowKey}
-                    className="transition-colors hover:bg-[#171E2B]"
+                    className={`transition-colors ${
+                      isEditing ? 'bg-sky-500/[0.06]' : 'hover:bg-[#171E2B]'
+                    }`}
                   >
                     <td className="px-3.5 py-2.5 font-mono text-slate-200 tabular-nums whitespace-nowrap">
                       <span>{formatDisplayDate(row.date)}</span>
@@ -583,8 +809,21 @@ export function PeriodDiscrepancyPanel({
                     <td className="px-3.5 py-2.5 font-medium text-sky-300 whitespace-nowrap">
                       {row.setup}
                     </td>
+
+                    {/* Direzione */}
                     <td className="px-3.5 py-2.5 font-mono font-semibold whitespace-nowrap">
-                      {sameDirection ? (
+                      {isEditing ? (
+                        <select
+                          aria-label="Direzione"
+                          value={draftBias}
+                          onChange={(e) => setDraftBias(e.target.value as BiasType)}
+                          onKeyDown={(e) => handleEditKeyDown(e, row)}
+                          className="rounded border border-[#263042] bg-[#0B0E14] px-2 py-1 font-mono text-xs text-slate-100 focus:border-sky-500 focus:outline-none"
+                        >
+                          <option value="LONG">LONG</option>
+                          <option value="SHORT">SHORT</option>
+                        </select>
+                      ) : sameDirection ? (
                         <span className={dirColor}>{displayBias}</span>
                       ) : (
                         <span className="text-rose-300">
@@ -592,23 +831,98 @@ export function PeriodDiscrepancyPanel({
                         </span>
                       )}
                     </td>
+
+                    {/* Esito Backtest (R) */}
                     <td className="px-3.5 py-2.5 whitespace-nowrap">
                       {formatOutcomeBadge(row.btTrade)}
                     </td>
+
+                    {/* Esito Journal Reale (R) */}
                     <td className="px-3.5 py-2.5 whitespace-nowrap">
-                      {formatOutcomeBadge(row.liveTrade)}
+                      {isEditing ? (
+                        <div className="inline-flex items-center gap-1.5">
+                          <select
+                            aria-label="Esito Journal Reale"
+                            value={draftOutcome}
+                            onChange={(e) =>
+                              handleOutcomeDraftChange(
+                                e.target.value as OutcomeType | '',
+                                row,
+                              )
+                            }
+                            onKeyDown={(e) => handleEditKeyDown(e, row)}
+                            className="rounded border border-[#263042] bg-[#0B0E14] px-2 py-1 font-mono text-xs text-slate-100 focus:border-sky-500 focus:outline-none"
+                          >
+                            {row.liveTrade === null ? (
+                              <option value="">— Non eseguito —</option>
+                            ) : null}
+                            <option value="TP">TP</option>
+                            <option value="STOP LOSS">STOP LOSS</option>
+                            <option value="BE">BE</option>
+                            <option value="UNFILLED">UNFILLED</option>
+                          </select>
+                          {draftOutcome !== '' ? (
+                            <input
+                              type="number"
+                              step="0.01"
+                              aria-label="R netto Journal Reale"
+                              value={
+                                draftOutcome === 'BE' || draftOutcome === 'UNFILLED'
+                                  ? '0'
+                                  : draftNetR
+                              }
+                              disabled={
+                                draftOutcome === 'BE' || draftOutcome === 'UNFILLED'
+                              }
+                              onChange={(e) => setDraftNetR(e.target.value)}
+                              onKeyDown={(e) => handleEditKeyDown(e, row)}
+                              className="w-16 rounded border border-[#263042] bg-[#0B0E14] px-1.5 py-1 text-right font-mono text-xs text-slate-100 tabular-nums focus:border-sky-500 focus:outline-none disabled:opacity-50"
+                            />
+                          ) : null}
+                        </div>
+                      ) : (
+                        formatOutcomeBadge(row.liveTrade)
+                      )}
                     </td>
+
+                    {/* Scostamento */}
                     <td className="px-3.5 py-2.5 whitespace-nowrap">
-                      {renderBadge(row)}
+                      {renderBadgeByKind(badgeKind)}
                     </td>
+
+                    {/* Note */}
                     <td
-                      className="max-w-[260px] truncate px-3.5 py-2.5 text-slate-300"
-                      title={row.notes || ''}
+                      className="max-w-[260px] px-3.5 py-2.5 text-slate-300"
+                      title={isEditing ? draftNotes : row.notes || ''}
                     >
-                      {row.notes || '—'}
+                      {isEditing ? (
+                        <input
+                          type="text"
+                          aria-label="Note"
+                          value={draftNotes}
+                          placeholder="Note o CONSAPEVOLE..."
+                          onChange={(e) => setDraftNotes(e.target.value)}
+                          onKeyDown={(e) => handleEditKeyDown(e, row)}
+                          className="w-full min-w-[160px] rounded border border-[#263042] bg-[#0B0E14] px-2 py-1 text-xs text-slate-100 placeholder:text-slate-600 focus:border-sky-500 focus:outline-none"
+                        />
+                      ) : (
+                        <span className="block truncate">{row.notes || '—'}</span>
+                      )}
                     </td>
+
+                    {/* Grafico */}
                     <td className="px-3.5 py-2.5 text-center whitespace-nowrap">
-                      {primaryUrl ? (
+                      {isEditing ? (
+                        <input
+                          type="url"
+                          aria-label="Link Grafico TradingView"
+                          value={draftUrl}
+                          placeholder="https://www.tradingview.com/..."
+                          onChange={(e) => setDraftUrl(e.target.value)}
+                          onKeyDown={(e) => handleEditKeyDown(e, row)}
+                          className="w-40 rounded border border-[#263042] bg-[#0B0E14] px-2 py-1 font-mono text-[11px] text-slate-100 placeholder:text-slate-600 focus:border-sky-500 focus:outline-none"
+                        />
+                      ) : primaryUrl ? (
                         <div className="inline-flex items-center justify-center gap-2">
                           <a
                             href={primaryUrl}
@@ -639,6 +953,46 @@ export function PeriodDiscrepancyPanel({
                         <span className="text-slate-600">—</span>
                       )}
                     </td>
+
+                    {/* Azioni */}
+                    {onSaveTrade ? (
+                      <td className="px-3.5 py-2.5 text-right whitespace-nowrap">
+                        {isEditing ? (
+                          <div className="inline-flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              disabled={isSaving}
+                              onClick={() => void handleSaveRow(row)}
+                              className="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/15 px-2 py-1 text-[11px] font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/25 disabled:opacity-50"
+                              title="Salva modifiche"
+                            >
+                              <Check className="h-3 w-3" />
+                              <span>{isSaving ? '...' : 'Salva'}</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isSaving}
+                              onClick={cancelEditing}
+                              className="inline-flex items-center rounded border border-[#263042] bg-[#0B0E14] p-1 text-slate-400 transition-colors hover:border-slate-500 hover:text-slate-200 disabled:opacity-50"
+                              title="Annulla"
+                              aria-label="Annulla modifica"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => startEditing(row)}
+                            className="inline-flex items-center gap-1 rounded border border-[#263042] bg-[#0B0E14] px-2 py-1 text-[11px] font-medium text-sky-300 transition-colors hover:border-sky-500/50 hover:text-sky-200"
+                            title="Modifica riga inline"
+                          >
+                            <Pencil className="h-3 w-3" />
+                            <span>{lang === 'en' ? 'Edit' : 'Modifica'}</span>
+                          </button>
+                        )}
+                      </td>
+                    ) : null}
                   </tr>
                 );
               })}

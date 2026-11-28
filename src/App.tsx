@@ -3220,6 +3220,7 @@ export function App() {
               backtestTrades={liveAlignedBacktestTrades}
               liveTrades={visibleDashboardLiveTrades}
               missedTrades={liveAlignedMissedTrades}
+              onSaveTrade={handleSaveTrade}
             />
 
             {/* Collapsible Fixed R Target Simulation (Based on RR Max, Backtest-only) */}
