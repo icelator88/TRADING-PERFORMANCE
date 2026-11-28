@@ -1,7 +1,11 @@
 import { useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, Target } from 'lucide-react';
 import type { Language, TradeRecord } from '../types/trading';
-import { formatR, roundTo } from '../utils/calculations';
+import {
+  formatR,
+  roundTo,
+  sortTradesChronologically,
+} from '../utils/calculations';
 
 interface FixedTargetSimulationCardProps {
   lang: Language;
@@ -17,6 +21,8 @@ interface TargetSimRow {
   label: string;
   netR: number;
   winRatePct: number;
+  maxConsecutiveLosses: number;
+  sustainabilityScore: number;
   wins: number;
   losses: number;
   breakevens: number;
@@ -27,6 +33,9 @@ interface SeriesSimResult {
   rows: TargetSimRow[];
   bestTarget: number | null;
   bestNetR: number;
+  bestWinRatePct: number;
+  bestMaxConsecutiveLosses: number;
+  bestSustainabilityScore: number;
   executedCount: number;
 }
 
@@ -35,20 +44,20 @@ function formatTargetLabel(target: number): string {
 }
 
 function simulateFixedTargets(trades: TradeRecord[]): SeriesSimResult {
-  const executedTrades = trades.filter((tr) => tr.outcome !== 'UNFILLED');
-  const executedCount = executedTrades.length;
+  const orderedExecuted = sortTradesChronologically(trades).filter(
+    (tr) => tr.outcome !== 'UNFILLED',
+  );
+  const executedCount = orderedExecuted.length;
 
   const rows: TargetSimRow[] = FIXED_TARGETS.map((target) => {
     let wins = 0;
     let losses = 0;
     let breakevens = 0;
     let netR = 0;
+    let curLossStreak = 0;
+    let maxConsecutiveLosses = 0;
 
-    for (const tr of trades) {
-      if (tr.outcome === 'UNFILLED') {
-        continue;
-      }
-
+    for (const tr of orderedExecuted) {
       const rawRrMax =
         tr.rrMax != null && Number.isFinite(tr.rrMax)
           ? tr.rrMax
@@ -59,10 +68,16 @@ function simulateFixedTargets(trades: TradeRecord[]): SeriesSimResult {
       if (rawRrMax !== null && rawRrMax >= target) {
         wins += 1;
         netR += target;
+        curLossStreak = 0;
       } else if (tr.outcome === 'STOP LOSS' || tr.netR < 0) {
         losses += 1;
         netR -= 1;
+        curLossStreak += 1;
+        if (curLossStreak > maxConsecutiveLosses) {
+          maxConsecutiveLosses = curLossStreak;
+        }
       } else {
+        // 0 R breakeven / missed target: adds no -1 R loss, but does not break a losing stretch until a target win occurs
         breakevens += 1;
       }
     }
@@ -71,11 +86,23 @@ function simulateFixedTargets(trades: TradeRecord[]): SeriesSimResult {
     const winRatePct =
       executedCount > 0 ? roundTo((wins / executedCount) * 100, 1) : 0;
 
+    // Balanced sustainability score: Net R weighted by Win Rate and penalized by Max Consecutive Losses
+    const sustainabilityScore =
+      roundedNetR > 0 && winRatePct > 0
+        ? roundTo(
+            (roundedNetR * Math.sqrt(winRatePct / 100)) /
+              Math.sqrt(Math.max(1, maxConsecutiveLosses)),
+            2,
+          )
+        : roundedNetR;
+
     return {
       target,
       label: formatTargetLabel(target),
       netR: roundedNetR,
       winRatePct,
+      maxConsecutiveLosses,
+      sustainabilityScore,
       wins,
       losses,
       breakevens,
@@ -83,27 +110,61 @@ function simulateFixedTargets(trades: TradeRecord[]): SeriesSimResult {
     };
   });
 
-  let bestTarget: number | null = null;
-  let bestNetR = -Infinity;
-  let bestWinRate = -1;
+  let bestRow: TargetSimRow | null = null;
 
   if (executedCount > 0) {
-    for (const row of rows) {
-      if (
-        row.netR > bestNetR ||
-        (row.netR === bestNetR && row.winRatePct > bestWinRate)
-      ) {
-        bestNetR = row.netR;
-        bestWinRate = row.winRatePct;
-        bestTarget = row.target;
+    const positiveRows = rows.filter((r) => r.netR > 0);
+    const pool = positiveRows.length > 0 ? positiveRows : rows;
+
+    for (const row of pool) {
+      if (!bestRow) {
+        bestRow = row;
+        continue;
+      }
+      if (positiveRows.length > 0) {
+        const betterScore = row.sustainabilityScore > bestRow.sustainabilityScore;
+        const tiedScoreBetterWr =
+          row.sustainabilityScore === bestRow.sustainabilityScore &&
+          row.winRatePct > bestRow.winRatePct;
+        const tiedAllBetterLoss =
+          row.sustainabilityScore === bestRow.sustainabilityScore &&
+          row.winRatePct === bestRow.winRatePct &&
+          row.maxConsecutiveLosses < bestRow.maxConsecutiveLosses;
+        const tiedAllBetterNetR =
+          row.sustainabilityScore === bestRow.sustainabilityScore &&
+          row.winRatePct === bestRow.winRatePct &&
+          row.maxConsecutiveLosses === bestRow.maxConsecutiveLosses &&
+          row.netR > bestRow.netR;
+
+        if (
+          betterScore ||
+          tiedScoreBetterWr ||
+          tiedAllBetterLoss ||
+          tiedAllBetterNetR
+        ) {
+          bestRow = row;
+        }
+      } else {
+        if (
+          row.netR > bestRow.netR ||
+          (row.netR === bestRow.netR && row.winRatePct > bestRow.winRatePct) ||
+          (row.netR === bestRow.netR &&
+            row.winRatePct === bestRow.winRatePct &&
+            row.maxConsecutiveLosses < bestRow.maxConsecutiveLosses)
+        ) {
+          bestRow = row;
+        }
       }
     }
   }
 
   return {
     rows,
-    bestTarget,
-    bestNetR: bestTarget !== null ? bestNetR : 0,
+    bestTarget: bestRow ? bestRow.target : null,
+    bestNetR: bestRow ? bestRow.netR : 0,
+    bestWinRatePct: bestRow ? bestRow.winRatePct : 0,
+    bestMaxConsecutiveLosses: bestRow ? bestRow.maxConsecutiveLosses : 0,
+    bestSustainabilityScore: bestRow ? bestRow.sustainabilityScore : 0,
     executedCount,
   };
 }
@@ -165,6 +226,13 @@ export function FixedTargetSimulationCard({
 
   const hasData = totalSim.executedCount > 0 || selectedSim.executedCount > 0;
 
+  const maxLossHeader =
+    lang === 'en'
+      ? 'Max Consec. Losses'
+      : lang === 'es'
+        ? 'Pérdidas Consec. Máx.'
+        : 'Max Loss Consec.';
+
   return (
     <section
       aria-label="Simulazione Target R Fissi (Basata su RR Max)"
@@ -174,7 +242,7 @@ export function FixedTargetSimulationCard({
         type="button"
         aria-expanded={isOpen}
         onClick={() => setIsOpen((prev) => !prev)}
-        className="flex w-full flex-wrap items-center justify-between gap-3 px-5 py-4 text-left transition-colors hover:bg-[#171E2B]/70 rounded-lg"
+        className="flex w-full flex-wrap items-center justify-between gap-3 rounded-lg px-5 py-4 text-left transition-colors hover:bg-[#171E2B]/70"
       >
         <div className="flex items-start gap-2.5">
           <Target className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
@@ -193,8 +261,10 @@ export function FixedTargetSimulationCard({
             </div>
             <p className="mt-0.5 text-xs text-slate-400">
               {lang === 'en'
-                ? 'Compares fixed R:R targets (1:3 to 1:10) on Backtest data: Selected Asset vs All Assets.'
-                : 'Confronto su dati Backtest per target fissi da 1:3 a 1:10: Asset Selezionato vs Tutti gli Asset (Totale).'}
+                ? 'Compares fixed R:R targets (1:3 to 1:10) on Backtest data by sustainability (Net R, Win Rate & Max Consecutive Losses).'
+                : lang === 'es'
+                  ? 'Comparativa en Backtest por target fijos de 1:3 a 1:10 según sostenibilidad (Net R, Win Rate y Pérdidas Consecutivas).'
+                  : 'Confronto su dati Backtest per target fissi da 1:3 a 1:10 con punteggio bilanciato (Net R, Win Rate e Max Loss Consec.).'}
             </p>
           </div>
         </div>
@@ -205,12 +275,14 @@ export function FixedTargetSimulationCard({
               {selectedSim.bestTarget !== null ? (
                 <span className="rounded border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 font-mono text-[11px] font-semibold text-emerald-300 tabular-nums whitespace-nowrap">
                   {effectiveAsset !== 'ALL' ? `${effectiveAsset}: ` : 'Asset: '}
-                  {formatTargetLabel(selectedSim.bestTarget)} ({formatR(selectedSim.bestNetR)})
+                  {formatTargetLabel(selectedSim.bestTarget)} ({formatR(selectedSim.bestNetR)} ·{' '}
+                  {selectedSim.bestWinRatePct.toFixed(1)}%)
                 </span>
               ) : null}
               {totalSim.bestTarget !== null ? (
                 <span className="rounded border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 font-mono text-[11px] font-semibold text-sky-300 tabular-nums whitespace-nowrap">
-                  Totale: {formatTargetLabel(totalSim.bestTarget)} ({formatR(totalSim.bestNetR)})
+                  Totale: {formatTargetLabel(totalSim.bestTarget)} ({formatR(totalSim.bestNetR)} ·{' '}
+                  {totalSim.bestWinRatePct.toFixed(1)}%)
                 </span>
               ) : null}
             </>
@@ -232,12 +304,22 @@ export function FixedTargetSimulationCard({
       {isOpen ? (
         <div className="border-t border-[#1E2634] px-5 pt-4 pb-5">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#1E2634] bg-[#0B0E14]/80 px-3.5 py-2.5 text-[11px] text-slate-400">
-            <div className="font-mono">
-              <span className="text-emerald-300">RR Max ≥ Target X → +X R</span>
-              <span className="mx-2 text-slate-600">·</span>
-              <span className="text-rose-300">Stop Loss → -1 R</span>
-              <span className="mx-2 text-slate-600">·</span>
-              <span className="text-slate-300">BE / Unfilled / RR Max &lt; X → 0 R</span>
+            <div className="space-y-1 font-mono">
+              <div>
+                <span className="text-emerald-300">RR Max ≥ Target X → +X R</span>
+                <span className="mx-2 text-slate-600">·</span>
+                <span className="text-rose-300">Stop Loss → -1 R</span>
+                <span className="mx-2 text-slate-600">·</span>
+                <span className="text-slate-300">BE / Unfilled / RR Max &lt; X → 0 R</span>
+              </div>
+              <div className="text-[10px] text-slate-400">
+                <span className="font-semibold text-emerald-300">TOP</span>{' '}
+                {lang === 'en'
+                  ? '= Best Sustainability Score (Net R × √Win Rate ÷ √Max Consec. Losses)'
+                  : lang === 'es'
+                    ? '= Mejor Puntuación de Sostenibilidad (Net R × √Win Rate ÷ √Pérdidas Consec.)'
+                    : '= Miglior Sostenibilità (Net R × √Win Rate ÷ √Max Loss Consec.)'}
+              </div>
             </div>
 
             {assetFilter === 'ALL' && availableAssets.length > 0 ? (
@@ -283,6 +365,12 @@ export function FixedTargetSimulationCard({
                         ({effectiveAsset})
                       </div>
                     </th>
+                    <th className="px-4 py-3 text-right whitespace-nowrap">
+                      <div>{maxLossHeader}</div>
+                      <div className="font-mono text-[10px] font-normal text-slate-500">
+                        ({effectiveAsset})
+                      </div>
+                    </th>
                     <th className="border-l border-[#1E2634] px-4 py-3 text-right whitespace-nowrap">
                       <div>Tutti gli Asset (Totale)</div>
                       <div className="font-mono text-[10px] font-normal text-slate-500">
@@ -291,6 +379,12 @@ export function FixedTargetSimulationCard({
                     </th>
                     <th className="px-4 py-3 text-right whitespace-nowrap">
                       <div>Win Rate %</div>
+                      <div className="font-mono text-[10px] font-normal text-slate-500">
+                        (Totale)
+                      </div>
+                    </th>
+                    <th className="px-4 py-3 text-right whitespace-nowrap">
+                      <div>{maxLossHeader}</div>
                       <div className="font-mono text-[10px] font-normal text-slate-500">
                         (Totale)
                       </div>
@@ -321,7 +415,10 @@ export function FixedTargetSimulationCard({
                         >
                           <div className="inline-flex items-center justify-end gap-2">
                             {isBestSel ? (
-                              <span className="rounded border border-emerald-500/50 bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
+                              <span
+                                title={`Score Sostenibilità: ${selRow.sustainabilityScore.toFixed(2)}`}
+                                className="rounded border border-emerald-500/50 bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300"
+                              >
                                 TOP
                               </span>
                             ) : null}
@@ -354,6 +451,21 @@ export function FixedTargetSimulationCard({
                             : '—'}
                         </td>
 
+                        {/* Asset Selezionato Max Consecutive Losses */}
+                        <td
+                          className={`px-4 py-2.5 text-right whitespace-nowrap ${
+                            isBestSel
+                              ? 'bg-emerald-500/15 font-semibold text-emerald-300'
+                              : selRow.maxConsecutiveLosses >= 10
+                                ? 'text-rose-300'
+                                : 'text-slate-300'
+                          }`}
+                        >
+                          {selectedSim.executedCount > 0
+                            ? selRow.maxConsecutiveLosses
+                            : '—'}
+                        </td>
+
                         {/* Tutti gli Asset (Totale) Net R */}
                         <td
                           className={`border-l border-[#1E2634] px-4 py-2.5 text-right whitespace-nowrap ${
@@ -362,7 +474,10 @@ export function FixedTargetSimulationCard({
                         >
                           <div className="inline-flex items-center justify-end gap-2">
                             {isBestTot ? (
-                              <span className="rounded border border-emerald-500/50 bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
+                              <span
+                                title={`Score Sostenibilità: ${totRow.sustainabilityScore.toFixed(2)}`}
+                                className="rounded border border-emerald-500/50 bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300"
+                              >
                                 TOP
                               </span>
                             ) : null}
@@ -392,6 +507,21 @@ export function FixedTargetSimulationCard({
                         >
                           {totalSim.executedCount > 0
                             ? `${totRow.winRatePct.toFixed(1)}%`
+                            : '—'}
+                        </td>
+
+                        {/* Tutti gli Asset (Totale) Max Consecutive Losses */}
+                        <td
+                          className={`px-4 py-2.5 text-right whitespace-nowrap ${
+                            isBestTot
+                              ? 'bg-emerald-500/15 font-semibold text-emerald-300'
+                              : totRow.maxConsecutiveLosses >= 10
+                                ? 'text-rose-300'
+                                : 'text-slate-300'
+                          }`}
+                        >
+                          {totalSim.executedCount > 0
+                            ? totRow.maxConsecutiveLosses
                             : '—'}
                         </td>
                       </tr>
